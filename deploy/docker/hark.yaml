@@ -1,0 +1,45 @@
+# listen: ":8080"
+# When HARK_TOKEN is empty there is no authentication; only suitable for a private network. ${ENV} references environment variables
+tokens:
+  - ${HARK_TOKEN}
+data_dir: /data       # Personal vocabulary: data_dir/vocab.db (SQLite), stored in the hark-data volume. Disabled if unset
+# max_session: 10m    # Maximum duration of a single session
+# finish_timeout: 15s # How long to wait for the engine to finalize after the client sends finish
+
+# Engine instances: names are arbitrary, type selects the engine, the other fields configure it.
+# With a single engine, it is the default; with several, set default_engine
+engines:
+  # Local SenseVoice: hark segments sentences and re-recognizes the whole sentence every interval while the user speaks
+  sensevoice:
+    type: sherpa
+    url: ws://sherpa:6006
+    interval: 500ms     # How often to re-recognize while speaking, so text appears as you speak; if omitted, recognize only at sentence end
+    # silence: 600ms    # How much silence ends a sentence
+
+  # OpenAI-compatible transcription APIs: OpenAI, Groq, SiliconFlow, self-hosted speaches, vLLM, whisper.cpp, ... (see engine/openai)
+  # openai:
+  #   type: openai
+  #   api_key: ${OPENAI_API_KEY}
+  #   model: gpt-4o-transcribe
+  #   # base_url: http://10.0.0.5:8000/v1   # Other compatible services
+  #   # Pay per request: leave out interval so each sentence is recognized only once
+
+  # Volcengine (Doubao) large-model streaming recognition (see engine/volc)
+  # doubao:
+  #   type: volc
+  #   api_key: ${VOLC_API_KEY}   # The legacy console uses app_key + access_key instead
+
+  # Any HTTP service that takes whole audio in and returns text (see engine/httpasr for the interface)
+  # whisper:
+  #   type: http
+  #   url: http://10.0.0.5:9000/recognize
+  #   token: ${WHISPER_TOKEN}
+
+  # Any WebSocket service that outputs text while listening (see engine/wsasr for the protocol)
+  # zipformer:
+  #   type: ws
+  #   url: ws://10.0.0.6:9001
+
+  # Fake engine: outputs a script with typos and corrections, no model needed; for testing
+  # mock:
+  #   type: mock

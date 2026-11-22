@@ -1,0 +1,10 @@
+# Build outputs
+/hark
+/harkc
+
+# Local config (may contain real tokens); see deploy/docker/hark.yaml for an example
+/config.yaml
+.env
+
+# Test audio
+*.wav

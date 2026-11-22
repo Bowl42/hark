@@ -1,0 +1,28 @@
+# Start hark + a local model with one command:
+#   echo HARK_TOKEN=$(openssl rand -hex 16) > deploy/docker/.env   # Optional: if unset, no authentication (private network only)
+#   docker compose -f deploy/docker/compose.yaml up -d --build
+# Then connect to ws://localhost:8080/v1/stream (if the port is taken, set HARK_PORT in .env)
+services:
+  sherpa:
+    build: ../sherpa
+    command: ["--num-work-threads=${WORKERS:-4}"]   # SenseVoice parallelism, about cores/2; override with WORKERS in .env
+    init: true
+    restart: unless-stopped
+
+  hark:
+    build: ../..
+    depends_on: [sherpa]
+    ports: ["${HARK_PORT:-8080}:8080"]   # Host port; override with HARK_PORT in .env
+    environment:   # Every variable referenced as ${...} in hark.yaml must be passed into the container here; put the values in .env
+      HARK_TOKEN: ${HARK_TOKEN:-}   # empty = no authentication
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      VOLC_API_KEY: ${VOLC_API_KEY:-}
+      WHISPER_TOKEN: ${WHISPER_TOKEN:-}
+    volumes:
+      - ./hark.yaml:/config.yaml:ro
+      - hark-data:/data   # Personal vocabulary
+    restart: unless-stopped
+    stop_grace_period: 30s   # On stop, wait for sessions to finish and wrap up; the default kills after 10 seconds
+
+volumes:
+  hark-data:

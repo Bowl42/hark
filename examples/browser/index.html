@@ -1,0 +1,141 @@
+<!doctype html>
+<!--
+  Live microphone transcription in the browser: a single file, no dependencies.
+  To open it (getUserMedia requires localhost or https):
+    cd examples/browser && python3 -m http.server 8000   # then open http://localhost:8000
+-->
+<meta charset="utf-8">
+<title>hark</title>
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; max-width: 48rem; margin: 2rem auto; padding: 0 1rem; }
+  input { font: inherit; width: 22rem; }
+  #text { margin-top: 1rem; min-height: 6rem; white-space: pre-wrap; }
+  .pending { color: #888; }
+</style>
+<p>
+  <input id="url" value="ws://localhost:8080/v1/stream">
+  <input id="token" placeholder="token (optional)" style="width:10rem">
+  <button id="btn">Start</button>
+  <span id="status"></span>
+</p>
+<div id="text"></div>
+
+<script type="worklet">
+// Microphone float32 → 16kHz s16le, sent in chunks of about 100ms
+registerProcessor("pcm16", class extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.step = sampleRate / 16000; // If the browser isn't sampling at 16k, downsample by simple averaging
+    this.acc = 0; this.sum = 0; this.n = 0;
+    this.buf = new Int16Array(1600); this.len = 0;
+  }
+  process([input]) {
+    const ch = input[0];
+    if (!ch) return true;
+    for (const v of ch) {
+      this.sum += v; this.n++; this.acc++;
+      if (this.acc < this.step) continue;
+      this.acc -= this.step;
+      const s = Math.max(-1, Math.min(1, this.sum / this.n));
+      this.sum = 0; this.n = 0;
+      this.buf[this.len++] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      if (this.len === this.buf.length) {
+        this.port.postMessage(this.buf.buffer, [this.buf.buffer]);
+        this.buf = new Int16Array(1600); this.len = 0;
+      }
+    }
+    return true;
+  }
+});
+</script>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let run = null; // Current recording: {ws, ctx, mic}
+
+// Merge updates per the protocol (docs/PROTOCOL.md): two levels of ops, segment level and within a segment; characters are counted in code points
+function applyText(text, ops) {
+  const old = Array.from(text), out = [];
+  let i = 0;
+  for (const op of ops) {
+    if (op.retain) { out.push(...old.slice(i, i + op.retain)); i += op.retain; }
+    else if (op.delete) i += op.delete;
+    else out.push(...Array.from(op.insert));
+  }
+  return out.concat(old.slice(i)).join("");
+}
+function apply(doc, u) {
+  if (u.rev !== doc.rev + 1) throw new Error(`rev ${u.rev} after ${doc.rev}`);
+  if (u.ops) {
+    const out = [];
+    let i = 0;
+    for (const op of u.ops) {
+      if (op.retain) { out.push(...doc.segs.slice(i, i + op.retain)); i += op.retain; }
+      else if (op.delete) i += op.delete;
+      else if (op.insert) out.push(...op.insert);
+      else {
+        const { text, ...meta } = op.update;
+        out.push({ ...meta, text: text ? applyText(doc.segs[i].text, text) : doc.segs[i].text });
+        i++;
+      }
+    }
+    doc.segs = out.concat(doc.segs.slice(i));
+  }
+  doc.rev = u.rev; doc.commit = u.commit;
+}
+
+function render(doc) {
+  const join = (segs) => segs.map((s) => s.text).join("");
+  $("text").replaceChildren(join(doc.segs.slice(0, doc.commit)),
+    Object.assign(document.createElement("span"), { className: "pending", textContent: join(doc.segs.slice(doc.commit)) }));
+}
+
+async function start() {
+  const url = new URL($("url").value);
+  if ($("token").value) url.searchParams.set("token", $("token").value); // Browser WebSockets can't send an Authorization header
+  const mic = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  let ctx;
+  try { ctx = new AudioContext({ sampleRate: 16000 }); } catch { ctx = new AudioContext(); }
+  const code = document.querySelector('script[type="worklet"]').textContent;
+  await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([code], { type: "text/javascript" })));
+  const node = new AudioWorkletNode(ctx, "pcm16");
+  ctx.createMediaStreamSource(mic).connect(node);
+  await ctx.resume();
+
+  const ws = new WebSocket(url);
+  ws.binaryType = "arraybuffer";
+  const doc = { segs: [], rev: 0, commit: 0 };
+  run = { ws, ctx, mic };
+  ws.onopen = () => ws.send(JSON.stringify({
+    type: "start", request_id: crypto.randomUUID(),
+    audio: { encoding: "pcm_s16le", sample_rate: 16000, channels: 1 },
+  }));
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === "started") node.port.onmessage = (a) => ws.readyState === 1 && ws.send(a.data);
+    else if (m.type === "update") { apply(doc, m); render(doc); }
+    else if (m.type === "rejected" || m.type === "error") $("status").textContent = `${m.error.code}: ${m.error.message}`;
+    else if (m.type === "track_end" && m.reason !== "done") $("status").textContent = `${m.reason}: ${m.error?.message ?? ""}`;
+    else if (m.type === "end") { $("status").textContent = `Ended: ${m.status}`; ws.close(); }
+  };
+  ws.onclose = () => { stop(); $("btn").textContent = "Start"; };
+  $("status").textContent = `Recording (${ctx.sampleRate} Hz)`;
+  $("btn").textContent = "Stop";
+}
+
+// Stop recording and send finish; the connection is closed on end, once the server has finalized
+function stop() {
+  if (!run) return;
+  const { ws, ctx, mic } = run;
+  run = null;
+  mic.getTracks().forEach((t) => t.stop());
+  ctx.close();
+  if (ws.readyState === 1) ws.send(JSON.stringify({ type: "finish" }));
+  else ws.close();
+}
+
+$("btn").onclick = () => {
+  if (run) { stop(); $("btn").textContent = "Finalizing…"; return; }
+  start().catch((e) => { $("status").textContent = e.message; stop(); });
+};
+</script>

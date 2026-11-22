@@ -1,0 +1,4 @@
+.git
+deploy/sherpa
+*.wav
+/config.yaml
