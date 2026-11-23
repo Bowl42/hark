@@ -34,9 +34,14 @@ func count(n, avail int) error {
 	return nil
 }
 
-func applyOps(old []Segment, ops []Op, commit int) ([]Segment, error) {
+// applyOps applies ops to a document whose first base segments have been trimmed: old holds segments base onward,
+// and positions in ops (and commit) are absolute. The trimmed segments are committed (base <= commit), so only
+// retains can pass over them; the result again holds segments base onward.
+func applyOps(old []Segment, ops []Op, commit, base int) ([]Segment, error) {
 	out := make([]Segment, 0, len(old))
-	i := 0
+	end := base + len(old)
+	i := 0 // absolute cursor; before base only retains can move it (anything else touches the committed prefix)
+	held := func(from, to int) []Segment { return old[max(from, base)-base : to-base] }
 	touch := func() error {
 		if i < commit {
 			return fmt.Errorf("op at segment %d touches committed prefix %d", i, commit)
@@ -56,13 +61,15 @@ func applyOps(old []Segment, ops []Op, commit int) ([]Segment, error) {
 		var err error
 		switch {
 		case op.Retain != 0:
-			if err = count(op.Retain, len(old)-i); err == nil {
-				out = append(out, old[i:i+op.Retain]...)
+			if err = count(op.Retain, end-i); err == nil {
+				if i+op.Retain > base {
+					out = append(out, held(i, i+op.Retain)...)
+				}
 				i += op.Retain
 			}
 		case op.Delete != 0:
 			if err = touch(); err == nil {
-				if err = count(op.Delete, len(old)-i); err == nil {
+				if err = count(op.Delete, end-i); err == nil {
 					i += op.Delete
 				}
 			}
@@ -73,11 +80,11 @@ func applyOps(old []Segment, ops []Op, commit int) ([]Segment, error) {
 				out = append(out, op.Insert...)
 			}
 		default:
-			if i >= len(old) {
-				err = fmt.Errorf("update past last segment %d", len(old))
+			if i >= end {
+				err = fmt.Errorf("update past last segment %d", end)
 			} else if err = touch(); err == nil {
 				u := op.Update
-				seg := Segment{Text: old[i].Text, Speaker: u.Speaker, AudioRange: u.AudioRange}
+				seg := Segment{Text: old[i-base].Text, Speaker: u.Speaker, AudioRange: u.AudioRange}
 				if u.Text != nil {
 					seg.Text, err = applyText(seg.Text, u.Text)
 				}
@@ -89,7 +96,7 @@ func applyOps(old []Segment, ops []Op, commit int) ([]Segment, error) {
 			return nil, fmt.Errorf("op %d: %w", k, err)
 		}
 	}
-	return append(out, old[i:]...), nil
+	return append(out, held(i, end)...), nil
 }
 
 func applyText(s string, ops []TextOp) (string, error) {

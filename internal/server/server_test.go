@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -697,5 +699,232 @@ func TestProtocolErrorsCloseConnection(t *testing.T) {
 				t.Fatal("connection should be closed")
 			}
 		})
+	}
+}
+
+// Rollover: the track moves to fresh engine streams during the session; the client sees one continuous document whose
+// commit advances at each rollover even under the strict policy.
+func TestRollover(t *testing.T) {
+	ts := start(t, server.Config{Rollover: time.Second},
+		server.Instance{Name: "mock", Type: "mock", Engine: must(mock.New(mock.Config{StepMS: 100}))})
+	r := dial(t, ts, "").speak(pcmStart("r", 1))
+	if r.end.Status != api.StatusComplete {
+		t.Fatalf("end = %+v", r.end)
+	}
+	commits := r.commits[0]
+	early := 0
+	for _, c := range commits[:len(commits)-1] {
+		early = max(early, c)
+	}
+	if d := r.docs[0]; early == 0 || d.Commit != len(d.Segments) || len(d.Segments) <= early {
+		t.Fatalf("commits %v, doc %+v", commits, d)
+	}
+}
+
+// slowFinish takes 600ms to finalize each engine stream and 50ms to open one, and consumes audio instantly.
+type slowFinish struct{}
+
+type slowStream struct{ out hark.Output }
+
+func (slowFinish) Open(_ context.Context, _ hark.Request, out hark.Output) (hark.Stream, error) {
+	time.Sleep(50 * time.Millisecond) // right after a rollover wait, before any new audio is consumed
+	return slowStream{out}, nil
+}
+func (slowStream) Write([]byte) error { return nil }
+func (s slowStream) Finish(ctx context.Context) error {
+	select {
+	case <-time.After(600 * time.Millisecond):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	s.out.Update([]hark.Segment{{Text: "x", Final: true}})
+	return nil
+}
+func (slowStream) Close() error { return nil }
+
+// Unthrottled audio outruns a rollover: the session waits for the old stream to finalize (600ms), which is longer
+// than the stall timeout (300ms). That wait is bounded by the session, so it must not be reported as a stall.
+// (Opening a stream, 50ms, does count, so the stall timeout leaves room for scheduling delays under load.)
+func TestRolloverIsNotAStall(t *testing.T) {
+	ts := start(t, server.Config{Rollover: time.Second, StallTimeout: 300 * time.Millisecond, FinishTimeout: 900 * time.Millisecond},
+		server.Instance{Name: "slow", Type: "test", Engine: slowFinish{}})
+	c := dial(t, ts, "")
+	c.send(pcmStart("s", 1))
+	if typ, data := c.recv(); typ != api.TypeStarted {
+		t.Fatalf("want started: %s", data)
+	}
+	go func() {
+		chunk := interleaved(16000, 1) // 1s, silent: every part is cut at its first chance
+		for i := 0; i < 130; i++ {     // enough for a part to run past rollover + 1m while the previous one finalizes
+			if c.c.Write(context.Background(), websocket.MessageBinary, chunk) != nil {
+				return
+			}
+		}
+		b, _ := json.Marshal(api.Envelope{Type: api.TypeFinish})
+		c.c.Write(context.Background(), websocket.MessageText, b)
+	}()
+	for {
+		typ, data := c.recv()
+		switch typ {
+		case api.TypeTrackEnd:
+			var e api.TrackEnd
+			json.Unmarshal(data, &e)
+			if e.Reason != api.ReasonDone {
+				t.Fatalf("track_end: %s", data)
+			}
+		case api.TypeEnd:
+			return
+		}
+	}
+}
+
+// wordy emits one ~100-byte final segment per 20ms of audio, so a long session builds a large transcript quickly.
+type wordy struct{}
+
+type wordyStream struct {
+	out  hark.Output
+	segs []hark.Segment
+}
+
+func (wordy) Open(_ context.Context, _ hark.Request, out hark.Output) (hark.Stream, error) {
+	return &wordyStream{out: out}, nil
+}
+func (s *wordyStream) Write(pcm []byte) error {
+	n := len(s.segs)
+	s.segs = append(s.segs, hark.Segment{Text: fmt.Sprintf("<%d %s \"q\">", n, strings.Repeat("w", 90)), Final: true,
+		Audio: hark.AudioRange{Start: int64(n * 320), End: int64(n*320 + 320)}})
+	s.out.Update(append([]hark.Segment(nil), s.segs...))
+	return nil
+}
+func (*wordyStream) Finish(context.Context) error { return nil }
+func (*wordyStream) Close() error                 { return nil }
+
+// longSession sends seconds of silent audio as fast as possible, then finish (or cancel), and returns every message
+// received.
+func longSession(t *testing.T, ts *httptest.Server, mode string, seconds int, last ...string) (docs *api.Doc, ends []api.TrackEnd, end api.End) {
+	stop := api.TypeFinish
+	if len(last) > 0 {
+		stop = last[0]
+	}
+	c := dial(t, ts, "")
+	c.c.SetReadLimit(-1)
+	st := pcmStart("long", 1)
+	st.Output = &api.Output{Mode: mode}
+	c.send(st)
+	if typ, data := c.recv(); typ != api.TypeStarted {
+		t.Fatalf("want started: %s", data)
+	}
+	go func() {
+		chunk := interleaved(16000, 1)
+		for i := 0; i < seconds; i++ {
+			if c.c.Write(context.Background(), websocket.MessageBinary, chunk) != nil {
+				return
+			}
+		}
+		if stop == api.TypeCancel {
+			time.Sleep(200 * time.Millisecond) // let the engine take the audio
+		}
+		b, _ := json.Marshal(api.Envelope{Type: stop})
+		c.c.Write(context.Background(), websocket.MessageText, b)
+	}()
+	doc := &api.Doc{}
+	for {
+		typ, data := c.recv()
+		switch typ {
+		case api.TypeUpdate:
+			var u api.Update
+			json.Unmarshal(data, &u)
+			if err := doc.Apply(u); err != nil {
+				t.Fatal(err)
+			}
+		case api.TypeTrackEnd:
+			var e api.TrackEnd
+			if err := json.Unmarshal(data, &e); err != nil {
+				t.Fatalf("track_end does not decode: %v", err)
+			}
+			ends = append(ends, e)
+		case api.TypeEnd:
+			json.Unmarshal(data, &end)
+			return doc, ends, end
+		}
+	}
+}
+
+// Final mode over a long session with rollovers: committed text goes to a spool file (the transcript is far beyond
+// 64KB), track_end is streamed from it, and it holds every segment in order. No file is left behind.
+func TestFinalModeSpool(t *testing.T) {
+	dir := t.TempDir()
+	ts := start(t, server.Config{Rollover: time.Second, SpoolDir: dir},
+		server.Instance{Name: "wordy", Type: "test", Engine: wordy{}})
+	_, ends, end := longSession(t, ts, api.ModeFinal, 20)
+	if end.Status != api.StatusComplete || len(ends) != 1 || ends[0].Snapshot == nil {
+		t.Fatalf("end %+v, track_end %+v", end, ends)
+	}
+	snap := ends[0].Snapshot
+	size, parts := 0, 0
+	for i, s := range snap.Segments {
+		size += len(s.Text)
+		if strings.HasPrefix(s.Text, "<0 ") {
+			parts++
+		}
+		// one segment per 20ms frame: audio ranges (in session time) say where each belongs
+		if s.AudioRange.StartSample != int64(i*320) || !strings.HasSuffix(s.Text, `"q">`) {
+			t.Fatalf("segment %d out of place: %+v", i, s)
+		}
+	}
+	if len(snap.Segments) != 1000 || size <= spoolMemory || parts < 5 ||
+		snap.Stable != len(snap.Segments) || snap.Commit != len(snap.Segments) {
+		t.Fatalf("%d segments (%d bytes, %d parts, stable %d commit %d)", len(snap.Segments), size, parts, snap.Stable, snap.Commit)
+	}
+	waitEmpty(t, dir)
+}
+
+// waitEmpty waits for the server to remove its spool files (it does so right after writing end).
+func waitEmpty(t *testing.T, dir string) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		left, _ := os.ReadDir(dir)
+		if len(left) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("spool files left: %v", left)
+		}
+	}
+}
+
+// Cancelled in final mode after much text was spooled: track_end still carries everything recognized, in order,
+// with the watermarks the session reached (the rest is not committed).
+func TestFinalModeSpoolCancel(t *testing.T) {
+	dir := t.TempDir()
+	ts := start(t, server.Config{Rollover: time.Second, SpoolDir: dir},
+		server.Instance{Name: "wordy", Type: "test", Engine: wordy{}})
+	_, ends, end := longSession(t, ts, api.ModeFinal, 20, api.TypeCancel)
+	if end.Reason != api.ReasonCancelled || len(ends) != 1 || ends[0].Reason != api.ReasonCancelled || ends[0].Snapshot == nil {
+		t.Fatalf("end %+v, track_end %+v", end, ends)
+	}
+	snap := ends[0].Snapshot
+	for i, s := range snap.Segments {
+		if s.AudioRange.StartSample != int64(i*320) {
+			t.Fatalf("segment %d out of place: %+v", i, s)
+		}
+	}
+	if len(snap.Segments) < 900 || snap.Commit > snap.Stable || snap.Stable > len(snap.Segments) || snap.Commit < 800 {
+		t.Fatalf("%d segments, stable %d, commit %d", len(snap.Segments), snap.Stable, snap.Commit)
+	}
+	waitEmpty(t, dir)
+}
+
+// spoolMemory mirrors server.spoolMemory.
+const spoolMemory = 64 << 10
+
+// If the result can't be stored, the track fails instead of returning part of the text as if it were complete.
+func TestFinalModeSpoolFailure(t *testing.T) {
+	ts := start(t, server.Config{Rollover: time.Second, SpoolDir: filepath.Join(t.TempDir(), "missing")},
+		server.Instance{Name: "wordy", Type: "test", Engine: wordy{}})
+	_, ends, end := longSession(t, ts, api.ModeFinal, 20)
+	if end.Status != api.StatusFailed || len(ends) != 1 || ends[0].Error == nil || ends[0].Error.Code != api.ErrInternal ||
+		ends[0].Snapshot == nil || len(ends[0].Snapshot.Segments) != 0 {
+		t.Fatalf("end %+v, track_end %+v", end, ends)
 	}
 }

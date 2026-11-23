@@ -211,8 +211,10 @@ type config struct {
 	Tokens        []string      `yaml:"tokens"`
 	DefaultEngine string        `yaml:"default_engine"`
 	MaxSession    time.Duration `yaml:"max_session"`
+	Rollover      time.Duration `yaml:"rollover"` // 0: session.DefaultRollover
 	FinishTimeout time.Duration `yaml:"finish_timeout"`
-	DataDir       string        `yaml:"data_dir"` // personal vocabulary directory; empty means disabled
+	DataDir       string        `yaml:"data_dir"`  // personal vocabulary directory; empty means disabled
+	SpoolDir      string        `yaml:"spool_dir"` // where final-mode results wait for track_end; empty: the system temp dir
 	Engines       yaml.Node     `yaml:"engines"`
 }
 
@@ -224,6 +226,9 @@ func parseConfig(raw []byte) (*config, error) {
 	}
 	if cfg.Listen == "" {
 		cfg.Listen = ":8080"
+	}
+	if cfg.MaxSession < 0 || cfg.Rollover < 0 {
+		return nil, errors.New("config: max_session and rollover must not be negative")
 	}
 	// ${X} expands to "" when the variable is unset; drop empty tokens so an empty token can't pass authentication.
 	tokens := cfg.Tokens[:0]
@@ -275,6 +280,8 @@ func (c *config) server(instances []server.Instance) server.Config {
 		Default:       def,
 		MaxSession:    c.MaxSession,
 		FinishTimeout: c.FinishTimeout,
+		Rollover:      c.Rollover,
+		SpoolDir:      c.SpoolDir,
 	}
 }
 

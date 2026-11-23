@@ -276,3 +276,72 @@ func checkCanonical(t *testing.T, ops []Op) {
 		}
 	}
 }
+
+// A Doc trimmed at random points applies the same updates as a full one: what it holds is always the full
+// document from Base on, and the trimmed pieces add up to the prefix before it.
+func TestTrimRandom(t *testing.T) {
+	r := rand.New(rand.NewPCG(3, 4))
+	for trial := 0; trial < 200; trial++ {
+		var full, trimmed Doc
+		var gone []Segment
+		var cur []Segment
+		commit := 0
+		for step := 0; step < 60; step++ {
+			next := append([]Segment(nil), cur[:commit]...)
+			for n := r.IntN(4); n > 0; n-- {
+				next = append(next, Segment{Text: string(rune('a' + r.IntN(26)))})
+			}
+			if len(cur) > commit && r.IntN(2) == 0 { // keep some of the old tail so Diff emits retains and updates
+				next = append(next[:commit], cur[commit:]...)
+				next[len(next)-1].Text += "x"
+			}
+			newCommit := commit + r.IntN(len(next)-commit+1)
+			u := Update{Rev: full.Rev + 1, Ops: Diff(cur, next, commit), Stable: newCommit, Commit: newCommit}
+			if ops := u.Ops; len(ops) > 0 && ops[0].Retain > 1 && r.IntN(2) == 0 { // valid but not canonical: split the retain
+				u.Ops = append([]Op{{Retain: 1}, {Retain: ops[0].Retain - 1}}, ops[1:]...)
+			}
+			if err := full.Apply(u); err != nil {
+				t.Fatalf("trial %d step %d full: %v", trial, step, err)
+			}
+			if err := trimmed.Apply(u); err != nil {
+				t.Fatalf("trial %d step %d trimmed (base %d): %v %+v", trial, step, trimmed.Base, err, u.Ops)
+			}
+			if r.IntN(3) == 0 {
+				gone = append(gone, trimmed.Trim()...)
+			}
+			if trimmed.Base != len(gone) || !reflect.DeepEqual(norm(gone), norm(full.Segments[:trimmed.Base])) ||
+				!reflect.DeepEqual(norm(trimmed.Segments), norm(full.Segments[trimmed.Base:])) {
+				t.Fatalf("trial %d step %d: trimmed %+v (base %d) vs full %+v", trial, step, trimmed.Segments, trimmed.Base, full.Segments)
+			}
+			cur, commit = next, newCommit
+		}
+	}
+}
+
+// Ops can't reach into the trimmed prefix (it is committed), and a failed Apply leaves the Doc as it was.
+func TestTrimmedRejects(t *testing.T) {
+	d := Doc{Rev: 1, Segments: segs("a", "b", "c"), Stable: 3, Commit: 2}
+	d.Trim()
+	if d.Base != 2 || d.Text() != "c" {
+		t.Fatalf("trim: base %d text %q", d.Base, d.Text())
+	}
+	for name, ops := range map[string][]Op{
+		"delete trimmed": {{Retain: 1}, {Delete: 1}},
+		"insert before":  {{Insert: segs("x")}},
+		"mixed op":       {{Retain: 2, Delete: 1}},
+		"retain past":    {{Retain: 4}},
+	} {
+		if err := d.Apply(Update{Rev: 2, Ops: ops, Stable: 3, Commit: 2}); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if d.Rev != 1 || d.Base != 2 || d.Text() != "c" {
+		t.Fatalf("doc changed on error: %+v", d)
+	}
+	if err := d.Apply(Update{Rev: 2, Ops: []Op{{Retain: 1}, {Retain: 1}, {Update: &SegUpdate{Text: []TextOp{{Retain: 1}, {Insert: "d"}}}}}, Stable: 3, Commit: 3}); err != nil || d.Text() != "cd" {
+		t.Fatalf("split retains: %v %q", err, d.Text())
+	}
+	if got := d.Trim(); len(got) != 1 || got[0].Text != "cd" || d.Trim() != nil || len(d.Segments) != 0 {
+		t.Fatalf("trim all: %+v, held %+v", got, d.Segments)
+	}
+}

@@ -87,7 +87,10 @@ type job struct {
 
 func newJob(c *connection, p jobParams) *job {
 	base, cancel := context.WithCancelCause(context.Background())
-	ctx, stopTimer := context.WithTimeoutCause(base, c.s.cfg.MaxSession, errMaxTime)
+	ctx, stopTimer := context.Context(base), context.CancelFunc(func() {})
+	if c.s.cfg.MaxSession > 0 {
+		ctx, stopTimer = context.WithTimeoutCause(base, c.s.cfg.MaxSession, errMaxTime)
+	}
 	return &job{
 		jobParams: p,
 		c:         c,
@@ -178,6 +181,9 @@ func (s *job) run() {
 	}
 	close(s.writes)
 	<-writerExited
+	for _, t := range s.tracks {
+		t.spool.close() // written or not, track_end is done with it
+	}
 	close(s.done)
 
 	s.cancel(nil) // stop demux and make engine calls still running return
@@ -286,6 +292,13 @@ func (s *job) deliver(pending [][][]byte) bool {
 			since := t.lastConsumed()
 			if blocked[i].After(since) {
 				since = blocked[i]
+			}
+			// Waiting for a rollover to finalize is not a stall (the session bounds that wait itself): don't count it,
+			// and restart the clock when it ends.
+			if waiting, ended := t.rolloverWait(); waiting {
+				since = time.Now()
+			} else if ended.After(since) {
+				since = ended
 			}
 			deadline := since.Add(stall)
 			if !time.Now().Before(deadline) {

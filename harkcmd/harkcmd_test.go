@@ -57,7 +57,7 @@ engines:
 	if len(sc.Tokens) != 1 || sc.Tokens[0] != "abc" {
 		t.Fatalf("tokens = %q (unset env must be dropped)", sc.Tokens)
 	}
-	if sc.MaxSession != 2*time.Minute || sc.FinishTimeout != 3*time.Second || cfg.Listen != ":8080" {
+	if sc.MaxSession != 2*time.Minute || sc.FinishTimeout != 3*time.Second || sc.Rollover != 0 || cfg.Listen != ":8080" {
 		t.Fatalf("server config = %+v listen %q", sc, cfg.Listen)
 	}
 	if sc.Default != "" {
@@ -65,6 +65,22 @@ engines:
 	}
 	if one := cfg.server(instances[:1]); one.Default != "a" {
 		t.Fatalf("the only engine should be the default, got %q", one.Default)
+	}
+}
+
+// rollover: omitted means the session default (0 here), negative is rejected
+func TestRolloverConfig(t *testing.T) {
+	for src, want := range map[string]time.Duration{"": 0, "rollover: 30s": 30 * time.Second} {
+		cfg, err := parseConfig([]byte(src + "\nengines: { a: { type: mock } }"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg.server(nil).Rollover; got != want {
+			t.Errorf("%q: rollover %v, want %v", src, got, want)
+		}
+	}
+	if _, err := parseConfig([]byte("rollover: -1s")); err == nil {
+		t.Error("negative rollover: want error")
 	}
 }
 

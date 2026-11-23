@@ -187,18 +187,19 @@ func run(url, token, engines string, freeze int, speed float64, quiet bool, path
 // committed returns the committed part (which will not change again); pending returns the rest, wrapped in [ ].
 func committed(d *api.Doc) string {
 	var b strings.Builder
-	for _, s := range d.Segments[:d.Commit] {
+	for _, s := range d.Segments[:d.Commit-d.Base] {
 		b.WriteString(s.Text)
 	}
 	return b.String()
 }
 
 func pending(d *api.Doc) string {
-	if d.Commit == len(d.Segments) {
+	held := d.Commit - d.Base
+	if held == len(d.Segments) {
 		return ""
 	}
 	var b strings.Builder
-	for _, s := range d.Segments[d.Commit:] {
+	for _, s := range d.Segments[held:] {
 		b.WriteString(s.Text)
 	}
 	return "[" + b.String() + "]"

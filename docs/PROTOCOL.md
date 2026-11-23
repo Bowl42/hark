@@ -284,7 +284,7 @@ commit guarantees that the result won't change again; it doesn't guarantee the r
 
 ### strict (default)
 
-All content is committed at once, only when the track ends normally (`done`); while in progress, `commit` stays at 0. Downstream consumers that want to use text while the user is speaking should consume by `stable` in a revocable way (display first, submit after commit).
+Content is committed when the track ends normally (`done`), and at each [rollover](#long-sessions); otherwise `commit` doesn't move. Downstream consumers that want to use text while the user is speaking should consume by `stable` in a revocable way (display first, submit after commit).
 
 ### freeze
 
@@ -303,6 +303,18 @@ Freezing is the gateway's promise, not an upstream guarantee. Later upstream cha
 The gateway never guesses boundaries by character length: number normalization and similar rewrites change the text length, and aligning by length would duplicate or lose content.
 
 freeze trades a little accuracy for earlier delivery and **works best with engines that provide segment timestamps**; `dropped_revisions` lets you monitor its cost.
+
+## Long sessions
+
+Sessions can run for hours. To keep that cheap and robust, the gateway rolls each track over to a fresh engine stream every so often (`rollover` in the server config, 2 minutes of audio by default): at the first pause of 500ms after that (or a minute later regardless), it finishes the current engine stream and continues on a new one. When audio arrives faster than real time, a stream can run up to two minutes over before the gateway applies backpressure. The client sees one continuous document:
+
+- When the finished stream's text is final, it is committed: `commit` jumps forward, under either policy. The new stream's text appears after it, joined with a space where English text meets
+- While the old stream finishes (usually well under a second), the new stream's text is held back, so for a moment new text appears a little later
+- `audio_range` stays in session time. Speaker labels from later streams get a `#n` suffix (`S1#2`), since a restarted engine may reuse a label for someone else (a `#` or `\` in an engine's own label is escaped with `\`, so labels never collide)
+
+Engine-side state, messages and connections stay bounded however long the session runs, and so does the gateway's memory: once committed text has been sent, it drops it. In `final` mode it keeps committed text in a temporary file (`spool_dir`) until `track_end`, which is then streamed, so expect a large message after a long session (roughly 100KB of JSON per hour of speech).
+
+Clients that run for hours can do the same: Go clients call `api.Doc.Trim` to take the committed segments out (to display or store them) so the `Doc` holds only what can still change; `Base` counts what was trimmed, and ops and watermarks keep using absolute positions.
 
 ## Editing while speaking
 
@@ -362,7 +374,7 @@ Entry: `{"from","to","state","source":"auto|manual","fixed":times corrected,"see
 - User names are `[a-z0-9._-]{1,64}`, case-insensitive
 - Manual entries have 1 to 32 characters per side, no newlines or leading/trailing spaces, and the two sides must differ
 - Limits: at most 1000 active rules per user (once full, manually adding a new `from` returns an error and automatic learning adds no more; replacing an already active `from` is unaffected) and 10000 entries; when entries are full, the oldest candidates and rejection records are evicted, and an evicted rejection record may be learned again automatically
-- `before` and `after` in corrections are each at most 64 KB (65536 bytes); the whole request body is at most 256 KB
+- `before` and `after` in corrections are each at most 64 KB (65536 bytes); the whole request body is at most 256 KB. Submit longer transcripts in pieces, each with its own `id` (e.g. `<session_id>:<track>:<index>`), cut where the user didn't edit, preferably at sentence ends; Go clients use `draft.Draft.Corrections`, which does exactly that
 - Errors: `400` invalid parameters or active rules full, `401` bad token, `404` personal vocabulary not enabled (`data_dir` not set), `413` request too large, `500` storage error, `503` server shutting down; error messages are plain text
 
 These endpoints use the same tokens as `/v1/stream`. For now (private network), **there is no per-user identity**: anyone who knows a user name can read and write that user's vocabulary.

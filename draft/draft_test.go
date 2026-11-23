@@ -1,6 +1,7 @@
 package draft
 
 import (
+	"fmt"
 	"math/rand/v2"
 	"slices"
 	"strings"
@@ -329,4 +330,104 @@ func segs(texts ...string) []api.Segment {
 		out[i] = api.Segment{Text: t}
 	}
 	return out
+}
+
+// Corrections: pieces fit the limit, are cut after sentence ends away from corrections, together reproduce the whole
+// transcript, and leave out pieces with unresolved conflicts.
+func TestCorrections(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&b, "第%d句话哈克很好。", i)
+	}
+	d := New(b.String())
+	// correct 哈克 → hark in a few sentences (user-document positions equal mirror positions before the first edit;
+	// edit from the end so earlier positions stay valid)
+	mirror := []rune(d.Mirror())
+	var at []int
+	for i := 0; i+1 < len(mirror); i++ {
+		if mirror[i] == '哈' && mirror[i+1] == '克' {
+			at = append(at, i)
+		}
+	}
+	for _, k := range []int{150, 90, 3} {
+		if err := d.Replace(at[k], at[k]+2, "hark"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pieces := d.Corrections(300)
+	var before, after string
+	for i, p := range pieces {
+		if len(p.Before) > 300 || len(p.After) > 300 {
+			t.Errorf("piece %d too large: %d / %d bytes", i, len(p.Before), len(p.After))
+		}
+		if i < len(pieces)-1 && !strings.HasSuffix(p.Before, "。") {
+			t.Errorf("piece %d not cut at a sentence end: %q", i, p.Before)
+		}
+		before += p.Before
+		after += p.After
+	}
+	if before != d.Mirror() || after != d.Text() || len(pieces) < 10 {
+		t.Fatalf("%d pieces don't reproduce the transcript", len(pieces))
+	}
+
+	// a conflict leaves its piece out
+	d.edits[1].Conflict = true
+	conflicted := d.Corrections(300)
+	if len(conflicted) != len(pieces)-1 {
+		t.Fatalf("%d pieces with a conflict, want %d", len(conflicted), len(pieces)-1)
+	}
+	for _, p := range conflicted {
+		if strings.Contains(p.Before, "第90句") {
+			t.Fatal("conflicted piece kept")
+		}
+	}
+
+	// no sentence ends: cut anywhere outside corrections; a correction never straddles a cut
+	d = New(strings.Repeat("哈克", 300))
+	d.Replace(100, 102, "hark")
+	all := ""
+	for _, p := range d.Corrections(100) {
+		if len(p.Before) > 100 || len(p.After) > 100 {
+			t.Fatalf("piece too large: %+v", p)
+		}
+		if strings.Contains(p.After, "har") && !strings.Contains(p.After, "hark") {
+			t.Fatalf("correction split: %+v", p)
+		}
+		all += p.After
+	}
+	if all != d.Text() {
+		t.Fatal("pieces don't reproduce the text")
+	}
+
+	// corrections ending at the end of the text count toward the last piece
+	// (a correction keeps a neighboring character, so with CJK the smallest piece around one is two characters)
+	for _, c := range []struct {
+		mirror string
+		a, b   int
+		text   string
+		limit  int
+	}{{"abc", 3, 3, "xy", 4}, {"abc", 2, 3, "xyz", 4}, {"abcd", 2, 4, "", 4}, {"一二三", 3, 3, "四", 6}} {
+		d := New(c.mirror)
+		d.Replace(c.a, c.b, c.text)
+		var b, a string
+		for _, p := range d.Corrections(c.limit) {
+			if len(p.After) > c.limit || len(p.Before) > c.limit {
+				t.Errorf("%+v: oversized piece %+v", c, p)
+			}
+			b, a = b+p.Before, a+p.After
+		}
+		if b != d.Mirror() || a != d.Text() {
+			t.Errorf("%+v: pieces %q / %q", c, b, a)
+		}
+	}
+
+	// empty mirror with typed text; a short transcript is one piece
+	d = New("")
+	d.Replace(0, 0, "hello")
+	if got := d.Corrections(100); len(got) != 1 || got[0].After != "hello" || got[0].Before != "" {
+		t.Fatalf("%+v", got)
+	}
+	if got := New("短句。").Corrections(api.MaxCorrectionBytes); len(got) != 1 || got[0].Before != "短句。" {
+		t.Fatalf("%+v", got)
+	}
 }

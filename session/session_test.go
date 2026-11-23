@@ -76,7 +76,7 @@ func speak(t *testing.T, s *session.Session, ms int) {
 const mockFinal = "今天天气很好。我们去公园吧。"
 
 func TestBasic(t *testing.T) {
-	s, err := session.Open(context.Background(), mockEngine(t), hark.Request{}, api.Commit{})
+	s, err := session.Open(context.Background(), mockEngine(t), hark.Request{}, session.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestBasic(t *testing.T) {
 }
 
 func TestFinalOnly(t *testing.T) {
-	s, _ := session.Open(context.Background(), mockEngine(t), hark.Request{}, api.Commit{})
+	s, _ := session.Open(context.Background(), mockEngine(t), hark.Request{}, session.Options{})
 	defer s.Close()
 	speak(t, s, 1000)
 	s.Finish(context.Background())
@@ -130,7 +130,7 @@ func TestVocabAndOptions(t *testing.T) {
 	}
 	e := &scripted{}
 	opts := map[string]any{"hotwords": []any{"hark"}}
-	s, _ := session.Open(context.Background(), vocab.Wrap(e, m), hark.Request{Options: opts, SessionID: "x"}, api.Commit{})
+	s, _ := session.Open(context.Background(), vocab.Wrap(e, m), hark.Request{Options: opts, SessionID: "x"}, session.Options{})
 	defer s.Close()
 	if e.req.SessionID != "x" || e.req.Options["hotwords"] == nil {
 		t.Fatalf("request = %+v", e.req)
@@ -145,7 +145,7 @@ func TestVocabAndOptions(t *testing.T) {
 }
 
 func TestEmptySession(t *testing.T) {
-	s, _ := session.Open(context.Background(), mockEngine(t), hark.Request{}, api.Commit{})
+	s, _ := session.Open(context.Background(), mockEngine(t), hark.Request{}, session.Options{})
 	defer s.Close()
 	if err := s.Finish(context.Background()); err != nil {
 		t.Fatal(err)
@@ -156,10 +156,10 @@ func TestEmptySession(t *testing.T) {
 }
 
 func TestBadOptions(t *testing.T) {
-	if _, err := session.Open(context.Background(), mockEngine(t), hark.Request{}, api.Commit{Policy: "nope"}); err == nil {
+	if _, err := session.Open(context.Background(), mockEngine(t), hark.Request{}, session.Options{Commit: api.Commit{Policy: "nope"}}); err == nil {
 		t.Fatal("expected error")
 	}
-	s, _ := session.Open(context.Background(), mockEngine(t), hark.Request{}, api.Commit{})
+	s, _ := session.Open(context.Background(), mockEngine(t), hark.Request{}, session.Options{})
 	defer s.Close()
 	if err := s.Write(make([]byte, 3)); err != session.ErrOddLength {
 		t.Fatalf("err = %v", err)
@@ -222,7 +222,7 @@ var errHang = errors.New("hang")
 func TestFreezeIndependentOfReader(t *testing.T) {
 	run := func(readEarly bool) (string, int) {
 		e := &scripted{}
-		s, _ := session.Open(context.Background(), e, hark.Request{}, api.Commit{Policy: api.CommitFreeze, AfterMS: 50})
+		s, _ := session.Open(context.Background(), e, hark.Request{}, session.Options{Commit: api.Commit{Policy: api.CommitFreeze, AfterMS: 50}})
 		defer s.Close()
 		var r *reader
 		if readEarly {
@@ -248,7 +248,7 @@ func TestFreezeIndependentOfReader(t *testing.T) {
 
 func TestWriteErrorEndsSession(t *testing.T) {
 	e := &scripted{}
-	s, _ := session.Open(context.Background(), e, hark.Request{}, api.Commit{})
+	s, _ := session.Open(context.Background(), e, hark.Request{}, session.Options{})
 	defer s.Close()
 	e.out.Update([]hark.Segment{{Text: "部分"}})
 	e.writeErr = errors.New("upstream gone")
@@ -273,7 +273,7 @@ func TestWriteErrorEndsSession(t *testing.T) {
 
 func TestFinishErrorAndTimeout(t *testing.T) {
 	e := &scripted{finishErr: errors.New("bad final")}
-	s, _ := session.Open(context.Background(), e, hark.Request{}, api.Commit{})
+	s, _ := session.Open(context.Background(), e, hark.Request{}, session.Options{})
 	if err := s.Finish(context.Background()); err == nil {
 		t.Fatal("expected error")
 	}
@@ -282,7 +282,7 @@ func TestFinishErrorAndTimeout(t *testing.T) {
 	}
 
 	e = &scripted{finishErr: errHang}
-	s, _ = session.Open(context.Background(), e, hark.Request{}, api.Commit{})
+	s, _ = session.Open(context.Background(), e, hark.Request{}, session.Options{})
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	if err := s.Finish(ctx); !errors.Is(err, context.DeadlineExceeded) {
@@ -293,7 +293,7 @@ func TestFinishErrorAndTimeout(t *testing.T) {
 // Close can interrupt a blocked Write and Finish.
 func TestCloseAbortsBlockedCalls(t *testing.T) {
 	e := &scripted{block: true}
-	s, _ := session.Open(context.Background(), e, hark.Request{}, api.Commit{})
+	s, _ := session.Open(context.Background(), e, hark.Request{}, session.Options{})
 	errc := make(chan error, 1)
 	go func() { errc <- s.Write(make([]byte, 2)) }()
 	time.Sleep(20 * time.Millisecond)
@@ -311,7 +311,7 @@ func TestCloseAbortsBlockedCalls(t *testing.T) {
 	}
 
 	e = &scripted{finishErr: errHang}
-	s, _ = session.Open(context.Background(), e, hark.Request{}, api.Commit{})
+	s, _ = session.Open(context.Background(), e, hark.Request{}, session.Options{})
 	go func() { errc <- s.Finish(context.Background()) }()
 	time.Sleep(20 * time.Millisecond)
 	s.Close()
@@ -328,7 +328,7 @@ func TestCloseAbortsBlockedCalls(t *testing.T) {
 func TestParentContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &scripted{block: true}
-	s, _ := session.Open(ctx, e, hark.Request{}, api.Commit{})
+	s, _ := session.Open(ctx, e, hark.Request{}, session.Options{})
 	r := read(t, s)
 	cancel()
 	r.wait(t)
@@ -345,7 +345,7 @@ func TestParentContextCancel(t *testing.T) {
 // Next's ctx bounds only this one wait and never skips an update; modifying the returned object doesn't affect internal state.
 func TestNextContextAndOwnership(t *testing.T) {
 	e := &scripted{}
-	s, _ := session.Open(context.Background(), e, hark.Request{}, api.Commit{})
+	s, _ := session.Open(context.Background(), e, hark.Request{}, session.Options{})
 	defer s.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -378,7 +378,7 @@ func TestCancelDuringOpen(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		ctx, cancel := context.WithCancel(context.Background())
 		e := &scripted{onOpen: cancel}
-		s, err := session.Open(ctx, e, hark.Request{}, api.Commit{})
+		s, err := session.Open(ctx, e, hark.Request{}, session.Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -396,9 +396,9 @@ func TestCancelDuringOpen(t *testing.T) {
 // On abnormal end, freezes already due are still committed, whether or not there is a reader; the remaining text is not committed.
 func TestFreezeOnAbort(t *testing.T) {
 	for _, how := range []string{"close", "write-error", "finish-error"} {
-		run := func(withReader bool) api.Snapshot {
+		run := func(withReader bool) session.Snapshot {
 			e := &scripted{finishErr: errors.New("bad")}
-			s, _ := session.Open(context.Background(), e, hark.Request{}, api.Commit{Policy: api.CommitFreeze, AfterMS: 30})
+			s, _ := session.Open(context.Background(), e, hark.Request{}, session.Options{Commit: api.Commit{Policy: api.CommitFreeze, AfterMS: 30}})
 			var r *reader
 			if withReader {
 				r = read(t, s)
@@ -430,7 +430,7 @@ func TestFreezeOnAbort(t *testing.T) {
 func TestCancelWinsOverFinish(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &scripted{onFinish: cancel}
-	s, _ := session.Open(ctx, e, hark.Request{}, api.Commit{})
+	s, _ := session.Open(ctx, e, hark.Request{}, session.Options{})
 	e.out.Update([]hark.Segment{{Text: "甲"}})
 	if err := s.Finish(context.Background()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("finish err = %v", err)
@@ -443,7 +443,7 @@ func TestCancelWinsOverFinish(t *testing.T) {
 // Finish times out while waiting for a blocked Write: it returns only ctx's error and the session is unaffected.
 func TestFinishWaitTimeout(t *testing.T) {
 	e := &scripted{block: true}
-	s, _ := session.Open(context.Background(), e, hark.Request{}, api.Commit{})
+	s, _ := session.Open(context.Background(), e, hark.Request{}, session.Options{})
 	go s.Write(make([]byte, 2))
 	time.Sleep(20 * time.Millisecond)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
@@ -465,7 +465,7 @@ func TestCloseWaitsForConcurrentClose(t *testing.T) {
 	gate := make(chan struct{})
 	e := &scripted{closeGate: gate}
 	ctx, cancel := context.WithCancel(context.Background())
-	s, err := session.Open(ctx, e, hark.Request{}, api.Commit{})
+	s, err := session.Open(ctx, e, hark.Request{}, session.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

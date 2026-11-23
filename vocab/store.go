@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/Bowl42/hark/api"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -38,7 +39,7 @@ const (
 	maxWords     = 10000 // total entries per user (counted by from→to): when full, the oldest candidate or rejected entry is evicted
 	maxRecent    = 512   // how many recent submissions to remember per user, for deduplication
 	minFixed     = 2     // corrected this way in at least two submissions
-	maxTextBytes = 64 << 10
+	maxTextBytes = api.MaxCorrectionBytes
 	maxManual    = 32 // max characters per side for manual entries
 	learnWorkers = 4  // concurrent learning computations
 )

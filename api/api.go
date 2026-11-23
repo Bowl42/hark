@@ -93,6 +93,10 @@ type Commit struct {
 // MaxFreezeMS is the upper bound of after_ms for the freeze policy.
 const MaxFreezeMS = 600_000
 
+// MaxCorrectionBytes is the most a personal-vocabulary correction's before or after may hold. Longer transcripts are
+// submitted in pieces (see draft.Draft.Corrections).
+const MaxCorrectionBytes = 64 << 10
+
 // Normalize validates the commit policy and fills in defaults: nil or an empty policy means strict (strict clears AfterMS).
 func (c *Commit) Normalize() (Commit, error) {
 	var out Commit

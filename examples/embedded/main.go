@@ -82,7 +82,7 @@ func main() {
 	}
 
 	ctx := context.Background()
-	s, err := session.Open(ctx, eng, hark.Request{}, commit)
+	s, err := session.Open(ctx, eng, hark.Request{}, session.Options{Commit: commit})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -91,8 +91,8 @@ func main() {
 	// 4. Read results: the same updates the server pushes, merged with api.Doc.
 	begin := time.Now()
 	read := make(chan error, 1)
+	var doc api.Doc
 	go func() {
-		var doc api.Doc
 		for {
 			u, err := s.Next(ctx)
 			if err != nil {
@@ -123,8 +123,10 @@ func main() {
 	if err := <-read; err != io.EOF {
 		log.Fatal(err)
 	}
+	// The session no longer keeps committed text Next has delivered, so the result is the Doc built from the updates.
+	// (Without a reader, s.Snapshot() after Finish would hold the whole result.)
 	fmt.Println("---")
-	for i, seg := range s.Snapshot().Segments {
+	for i, seg := range doc.Segments {
 		fmt.Printf("%d: %s\n", i, seg.Text)
 	}
 }

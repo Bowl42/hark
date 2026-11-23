@@ -29,7 +29,13 @@ type track struct {
 	queue    chan []byte  // mono 20ms frames; closed by demux at end of audio
 	consumed atomic.Int64 // when audio was last taken from the queue (UnixNano), for stall detection
 
-	sess *session.Session // nil if Open failed
+	sess *session.Session                // nil if Open failed
+	live atomic.Pointer[session.Session] // sess, readable from demux
+
+	// Output mode final: the result is built from the session's updates as a client would, with committed segments
+	// moved to the spool, so neither the session nor the track keeps the whole transcript in memory.
+	doc   api.Doc
+	spool *spool // closed by the job once its writer has exited
 
 	reason string // final state; readable after run returns
 }
@@ -38,15 +44,33 @@ func newTrack(s *job, idx int, p trackPlan) *track {
 	ctx, cancel := context.WithCancelCause(s.ctx)
 	t := &track{s: s, idx: idx, plan: p, ctx: ctx, cancel: cancel,
 		queue: make(chan []byte, max(1, int(s.c.s.cfg.AudioQueue/(20*time.Millisecond))))}
+	if s.output.Mode == api.ModeFinal {
+		t.spool = &spool{dir: s.c.s.cfg.SpoolDir}
+	}
 	t.consumed.Store(time.Now().UnixNano())
 	return t
 }
 
 func (t *track) lastConsumed() time.Time { return time.Unix(0, t.consumed.Load()) }
 
+// rolloverWait reports the session's rollover wait (see session.RolloverWait), which stall detection must not mistake
+// for a stuck engine.
+func (t *track) rolloverWait() (bool, time.Time) {
+	if s := t.live.Load(); s != nil {
+		return s.RolloverWait()
+	}
+	return false, time.Time{}
+}
+
 // run runs until this track ends, then writes its track_end.
 func (t *track) run() {
 	reason, apiErr := t.execute()
+	if t.spool != nil && reason != "" {
+		// The rest of the result joins the spool; if it can't be stored, the result can't be delivered complete.
+		if err := t.spool.add(t.doc.Segments); err != nil {
+			reason, apiErr = t.storageFailed(err)
+		}
+	}
 	t.reason = reason
 	t.cancel(nil)        // mark this track ended: demux stops delivering audio to it
 	signal(t.s.progress) // wake a delivery that may be waiting on this track so it moves on to the others
@@ -69,7 +93,9 @@ func (t *track) execute() (string, *api.Error) {
 		Options:   t.plan.options,
 		Log:       t.s.c.log.With("track", t.idx, "channel", t.plan.channel),
 	}
-	sess, err := session.Open(t.ctx, vocab.Wrap(t.plan.engine, t.plan.vocab), req, t.s.commit)
+	sess, err := session.Open(t.ctx, vocab.Wrap(t.plan.engine, t.plan.vocab), req, session.Options{
+		Commit: t.s.commit, Rollover: t.s.c.s.cfg.Rollover, PartFinishTimeout: t.s.c.s.cfg.FinishTimeout,
+	})
 	if err != nil {
 		if r, e, ok := t.byCause(); ok {
 			return r, e
@@ -77,6 +103,7 @@ func (t *track) execute() (string, *api.Error) {
 		return api.ReasonError, &api.Error{Code: api.ErrEngine, Message: err.Error(), Retryable: true}
 	}
 	t.sess = sess
+	t.live.Store(sess)
 
 	var worker sync.WaitGroup
 	defer t.background(&worker)
@@ -87,12 +114,17 @@ func (t *track) execute() (string, *api.Error) {
 	}()
 
 	// Read until the session's final state with a ctx that isn't cancelled with the track: when the track is aborted,
-	// the session itself (watching t.ctx) seals and ends, so Snapshot / Dropped are fixed by the time we return.
-	// Updates read after an abort are discarded.
+	// the session itself (watching t.ctx) seals and ends, so the result and Dropped are fixed by the time we return.
+	// In delta mode, updates read after an abort are not sent; final mode collects every update (the result is
+	// built from them).
 	for {
 		u, err := sess.Next(context.Background())
 		if err == nil {
-			if _, _, aborted := t.byCause(); !aborted {
+			if t.spool != nil {
+				if err := t.collect(u); err != nil {
+					return t.storageFailed(err)
+				}
+			} else if _, _, aborted := t.byCause(); !aborted {
 				t.deliver(u)
 			}
 			continue
@@ -106,6 +138,8 @@ func (t *track) execute() (string, *api.Error) {
 			return api.ReasonDone, nil
 		case errors.Is(err, errFinishTimeout):
 			return api.ReasonTimeout, &api.Error{Code: api.ErrTimeout, Message: errFinishTimeout.Error(), Retryable: true}
+		case errors.Is(err, session.ErrRolloverTimeout):
+			return api.ReasonTimeout, &api.Error{Code: api.ErrTimeout, Message: err.Error(), Retryable: true}
 		default:
 			return api.ReasonError, &api.Error{Code: api.ErrEngine, Message: err.Error(), Retryable: true}
 		}
@@ -137,11 +171,17 @@ func (t *track) feed() {
 	}
 }
 
-// deliver sends u tagged with the track number in delta mode (final mode sends only the snapshot at the end).
-func (t *track) deliver(u api.Update) {
-	if t.s.output.Mode != api.ModeDelta {
-		return
+// collect applies u to the final-mode result and moves what it commits to the spool.
+func (t *track) collect(u api.Update) error {
+	if err := t.doc.Apply(u); err != nil {
+		t.spool.err = err // the result is no longer trustworthy: track_end must not present it
+		return err
 	}
+	return t.spool.add(t.doc.Trim())
+}
+
+// deliver sends u tagged with the track number in delta mode.
+func (t *track) deliver(u api.Update) {
 	u.Track = t.idx
 	t.s.send(u)
 }
@@ -170,16 +210,24 @@ func (t *track) byCause() (string, *api.Error, bool) {
 	}
 }
 
-func (t *track) endMsg(reason string, apiErr *api.Error, dropped int) api.TrackEnd {
+// storageFailed ends a final-mode track whose result couldn't be stored.
+func (t *track) storageFailed(err error) (string, *api.Error) {
+	t.s.log.Error("storing final output", "track", t.idx, "err", err)
+	return api.ReasonError, &api.Error{Code: api.ErrInternal, Message: "storing the transcript failed"}
+}
+
+// endMsg returns track_end. In final mode it carries the result, streamed from the spool; if the spool failed, the
+// snapshot is empty (the track has failed) rather than part of the text passed off as the whole.
+func (t *track) endMsg(reason string, apiErr *api.Error, dropped int) any {
 	msg := api.TrackEnd{Type: api.TypeTrackEnd, Track: t.idx, Reason: reason, Error: apiErr, DroppedRevisions: dropped}
-	if t.s.output.Mode == api.ModeFinal {
-		snap := api.Snapshot{Segments: []api.Segment{}}
-		if t.sess != nil {
-			snap = t.sess.Snapshot()
-		}
-		msg.Snapshot = &snap
+	switch {
+	case t.spool == nil:
+		return msg
+	case t.spool.err != nil:
+		msg.Snapshot = &api.Snapshot{Segments: []api.Segment{}}
+		return msg
 	}
-	return msg
+	return &finalEnd{msg: msg, spool: t.spool, stable: t.doc.Stable, commit: t.doc.Commit}
 }
 
 func signal(ch chan struct{}) {

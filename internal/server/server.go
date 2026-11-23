@@ -33,12 +33,17 @@ type Instance struct {
 type Config struct {
 	Tokens        []string      // empty: no authentication
 	Default       string        // default engine name
-	MaxSession    time.Duration // max duration of one session
-	FinishTimeout time.Duration // how long to wait for upstream to finalize after finish
+	MaxSession    time.Duration // max duration of one session; 0 = unlimited
+	FinishTimeout time.Duration // how long to wait for upstream to finalize after finish (also bounds each rollover)
+	// Rollover bounds how much audio one engine stream receives before the session moves to a fresh stream at a
+	// pause (see session.Options.Rollover). 0 = session.DefaultRollover.
+	Rollover time.Duration
 	// AudioQueue is how much audio each engine track buffers; when full, backpressure applies.
 	AudioQueue time.Duration
 	// StallTimeout is how long to wait at most once a track's audio queue is full; beyond it the engine is considered stuck and only that track is ended.
 	StallTimeout time.Duration
+	// SpoolDir is where output-mode final tracks keep committed text beyond 64KB until track_end; "" = os.TempDir().
+	SpoolDir string
 	// Vocab is the personal vocabulary store; nil means disabled.
 	Vocab *vocab.Store
 }
@@ -59,9 +64,6 @@ type Server struct {
 }
 
 func New(cfg Config, instances []Instance, log *slog.Logger) (*Server, error) {
-	if cfg.MaxSession <= 0 {
-		cfg.MaxSession = 10 * time.Minute
-	}
 	if cfg.FinishTimeout <= 0 {
 		cfg.FinishTimeout = 15 * time.Second
 	}
@@ -234,7 +236,21 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeJSON writes with a timeout. It doesn't use the session ctx, so end can still be written after the session is cancelled.
+// A *finalEnd is streamed; if it fails halfway the message can't be completed, so the connection is closed.
 func (s *Server) writeJSON(c *websocket.Conn, v any) error {
+	if m, ok := v.(*finalEnd); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+		defer cancel()
+		w, err := c.Writer(ctx, websocket.MessageText)
+		if err != nil {
+			return err
+		}
+		if err := m.writeTo(w); err != nil {
+			c.Close(websocket.StatusInternalError, "failed to write the transcript")
+			return err
+		}
+		return w.Close()
+	}
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err

@@ -285,7 +285,7 @@ func (d *Draft) apply(c Change) (visible Change, changed bool) {
 		d.edits = slices.Delete(d.edits, hit[0], hit[len(hit)-1]+1)
 	}
 	for i := range d.edits {
-		if d.edits[i].Start >= c.End && !(d.edits[i].End <= c.Start) {
+		if d.edits[i].Start >= c.End && d.edits[i].End > c.Start {
 			d.edits[i].Start += delta
 			d.edits[i].End += delta
 		}
@@ -353,6 +353,100 @@ func Changes(old []api.Segment, ops []api.Op) []Change {
 			}
 			i++
 		}
+	}
+	return out
+}
+
+// Correction is one piece of a transcript for the personal vocabulary's corrections endpoint: what was recognized
+// (Before, from the mirror) and the user's version of the same stretch (After).
+type Correction struct{ Before, After string }
+
+// Corrections splits the transcript into pieces whose Before and After are each at most limit bytes (the server
+// accepts api.MaxCorrectionBytes), for submitting long transcripts piece by piece. Pieces are cut after a sentence
+// end where possible, never inside or right next to a user correction (learning needs the neighboring characters).
+// Pieces containing an unresolved conflict are left out: a conflict is not evidence. A single correction longer than
+// limit can't be split; its piece comes out oversized and the server will reject it.
+//
+// Submit every piece, changed or not (unchanged text is evidence too), each with its own id, such as
+// "<session_id>:<track>:<index>".
+func (d *Draft) Corrections(limit int) []Correction {
+	n := len(d.mirror)
+	// before[m], after[m]: bytes of the mirror's / the user's text up to mirror position m (after is only meaningful
+	// where cutting is allowed). ok[m]: m is outside every correction and not at its edge.
+	before, after := make([]int, n+1), make([]int, n+1)
+	ok := make([]bool, n+1)
+	for m := range ok {
+		ok[m] = true
+	}
+	e, extra := 0, 0 // extra: bytes the user's text has over the mirror's, for corrections before m
+	for m := 0; m <= n; m++ {
+		for e < len(d.edits) && d.edits[e].End < m {
+			ed := d.edits[e]
+			extra += len(ed.Text) - len(string(d.mirror[ed.Start:ed.End]))
+			e++
+		}
+		for _, ed := range d.edits[e:] {
+			if ed.Start > m {
+				break
+			}
+			ok[m] = false // inside or at the edge of ed
+		}
+		if m > 0 {
+			before[m] = before[m-1] + len(string(d.mirror[m-1]))
+		}
+		after[m] = before[m] + extra
+	}
+	ok[n] = true
+	after[n] = len(d.Text()) // the end may also follow corrections that end there
+	size := func(a, b int) int { return max(before[b]-before[a], after[b]-after[a]) }
+
+	var out []Correction
+	next := 0 // first correction not yet in a piece; cuts never touch a correction, so each lies wholly in one piece
+	emit := func(a, b int) {
+		bt, at := d.mirror[a:b], []rune(nil)
+		m := a
+		conflict := false
+		for ; next < len(d.edits) && d.edits[next].End <= b; next++ {
+			ed := d.edits[next]
+			conflict = conflict || ed.Conflict
+			at = append(at, d.mirror[m:ed.Start]...)
+			at = append(at, []rune(ed.Text)...)
+			m = ed.End
+		}
+		at = append(at, d.mirror[m:b]...)
+		if !conflict && (len(bt) > 0 || len(at) > 0) {
+			out = append(out, Correction{Before: string(bt), After: string(at)})
+		}
+	}
+	start, lastSentence, lastAny := 0, -1, -1
+	for m := 1; m <= n; m++ {
+		if !ok[m] {
+			continue
+		}
+		if size(start, m) > limit {
+			cut := lastSentence
+			if cut <= start {
+				cut = lastAny
+			}
+			if cut <= start {
+				cut = m // nothing fits: the smallest piece possible, oversized
+			}
+			emit(start, cut)
+			start, lastSentence, lastAny = cut, -1, -1
+			m = cut
+			continue
+		}
+		if m == n {
+			emit(start, n)
+			break
+		}
+		lastAny = m
+		if strings.ContainsRune("。！？；!?;.\n", d.mirror[m-1]) {
+			lastSentence = m
+		}
+	}
+	if n == 0 && len(d.edits) > 0 {
+		emit(0, 0)
 	}
 	return out
 }
