@@ -11,6 +11,8 @@
 //     as a whole, and the new result replaces the old one (downstream sees the current sentence being
 //     rewritten over and over)
 //   - Finalization: when a sentence ends, the whole sentence is recognized once more and the result is marked Final
+//   - Handover: finalized sentences (in order) are handed over to hark once and forgotten (see hark.Output), so a
+//     stream only keeps the sentences still in progress and can run for hours without a rollover
 //
 // An engine author only implements Recognizer and wraps it into an engine with New:
 //

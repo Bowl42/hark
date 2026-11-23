@@ -5,15 +5,16 @@
 // resulting document is the same.
 //
 // Session is the bridge from "engine snapshots" to "a document with commitments", and it does only that: one engine,
-// one mono audio stream, one track. For long sessions it rolls over to a fresh engine stream at a pause every so
-// often (Options.Rollover), so engine-side state, messages and connections stay bounded however long the session runs. For multiple channels or comparing engines, open multiple Sessions; for personal
+// one mono audio stream, one track. For multiple channels or comparing engines, open multiple Sessions; for personal
 // vocabulary replacement, wrap the engine with vocab.Wrap before passing it to Open.
 //
+// Long sessions stay bounded however long they run: segments the engine hands over (see hark.Output) are committed
+// and leave the engine stream; an engine stream holding too much unfinalized audio is rolled over to a fresh one at a
+// pause (Options.Rollover); and committed segments are dropped once Next has delivered them.
+//
 // Usage: Open → a goroutine loops on Next to read updates (io.EOF on normal end) → Write audio → Finish.
-// If you only need the final result, you don't need to call Next: read Snapshot after Finish. With Next, the session
-// drops committed segments once delivered, so long sessions stay flat in memory; use api.Doc.Trim to do the same on
-// your side. See examples/embedded
-// for a complete example.
+// If you only need the final result, you don't need to call Next: read Snapshot after Finish. With Next, the reader
+// holds the document; use api.Doc.Trim to keep it flat in memory too. See examples/embedded for a complete example.
 package session
 
 import (

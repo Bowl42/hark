@@ -49,8 +49,8 @@ func (o *rewriteOutput) Update(done, live []hark.Segment) {
 	o.out.Update(done, live)
 }
 
-// rewriter applies the vocabulary to one stream of snapshots. The engine reports a full snapshot every time,
-// but most segments are unchanged, so it caches the previous result by segment index and reuses it when the
+// rewriter applies the vocabulary to one stream of snapshots. The engine reports a full snapshot (of what it hasn't
+// handed over) every time, but most segments are unchanged, so it caches the previous result by segment index and reuses it when the
 // raw text and both boundary characters are unchanged. Not safe for concurrent use.
 //
 // Segments the engine hands over leave the snapshot for good: handOver drops them from the cache and keeps the

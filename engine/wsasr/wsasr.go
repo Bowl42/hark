@@ -14,7 +14,7 @@
 //	  text    {"type":"finish"}                                           audio has ended; no more audio follows
 //
 //	service → hark
-//	  {"type":"result","segments":[{"text":"today's weather","final":false}, ...]}   sent whenever the result changes, always all sentences
+//	  {"type":"result","segments":[{"text":"today's weather","final":false}, ...]}   sent whenever the result changes, always all sentences not handed over yet
 //	  {"type":"done"}                                                                sent after receiving finish and sending the final result; the only sign of a normal end
 //	  {"type":"error","message":"..."}                                               an error; this track ends with engine_error
 //
