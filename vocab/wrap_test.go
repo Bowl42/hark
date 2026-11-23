@@ -47,18 +47,30 @@ func (e *fakeEngine) Open(_ context.Context, _ hark.Request, out hark.Output) (h
 	return nil, nil
 }
 
-// recorder keeps the latest update: what was handed over in it, and the live segments.
+// recorder keeps the latest snapshot and how many segments were handed over.
 type recorder struct {
 	mu   sync.Mutex
-	done []hark.Segment
 	last []hark.Segment
+	done int
 	n    int
 }
 
-func (r *recorder) Update(done, live []hark.Segment) {
+func (r *recorder) Update(segs []hark.Segment) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.done, r.last, r.n = done, live, r.n+1
+	r.last, r.n = segs, r.n+1
+}
+
+func (r *recorder) Done(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.done += n
+}
+
+// report is an engine's Update of done followed by live, then Done for the done part.
+func report(out hark.Output, done, live []hark.Segment) {
+	out.Update(append(append([]hark.Segment(nil), done...), live...))
+	out.Done(len(done))
 }
 
 func TestWrap(t *testing.T) {
@@ -71,7 +83,7 @@ func TestWrap(t *testing.T) {
 	if _, err := e.Open(context.Background(), hark.Request{}, &rec); err != nil {
 		t.Fatal(err)
 	}
-	inner.out.Update(nil, []hark.Segment{{Text: "用哈克", Final: true}})
+	inner.out.Update([]hark.Segment{{Text: "用哈克", Final: true}})
 	if rec.last[0].Text != "用hark" || !rec.last[0].Final {
 		t.Fatalf("got=%+v", rec.last)
 	}
@@ -85,7 +97,7 @@ func TestWrap(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
-				out2.Update(nil, []hark.Segment{{Text: fmt.Sprintf("哈克%d", j)}})
+				out2.Update([]hark.Segment{{Text: fmt.Sprintf("哈克%d", j)}})
 			}
 		}()
 	}
@@ -125,12 +137,28 @@ func TestWrapHandover(t *testing.T) {
 	if _, err := e.Open(context.Background(), hark.Request{}, &rec); err != nil {
 		t.Fatal(err)
 	}
-	inner.out.Update([]hark.Segment{{Text: "foo"}}, []hark.Segment{{Text: "bar"}})
-	if rec.done[0].Text != "foo" || rec.last[0].Text != "bar" {
-		t.Fatalf("handover: done %+v live %+v", rec.done, rec.last)
+	report(inner.out, []hark.Segment{{Text: "foo"}}, []hark.Segment{{Text: "bar"}})
+	if rec.done != 1 || rec.last[0].Text != "foo" || rec.last[1].Text != "bar" {
+		t.Fatalf("handover: done %d, snapshot %+v", rec.done, rec.last)
 	}
-	inner.out.Update(nil, []hark.Segment{{Text: "bar"}, {Text: " bar"}})
+	inner.out.Update([]hark.Segment{{Text: "bar"}, {Text: " bar"}})
 	if rec.last[0].Text != "bar" || rec.last[1].Text != " X" {
 		t.Fatalf("after handover: %+v", rec.last)
+	}
+}
+
+// Done with n <= 0 or beyond the snapshot doesn't break the rewriter.
+func TestWrapDoneBounds(t *testing.T) {
+	inner := &fakeEngine{}
+	e := Wrap(inner, mustCompile(t, map[string]string{"哈克": "hark"}))
+	var rec recorder
+	e.Open(context.Background(), hark.Request{}, &rec)
+	inner.out.Done(1)
+	inner.out.Done(-1)
+	inner.out.Update([]hark.Segment{{Text: "哈克"}})
+	inner.out.Done(5)
+	inner.out.Update([]hark.Segment{{Text: "用哈克"}})
+	if rec.last[0].Text != "用hark" {
+		t.Fatalf("%+v", rec.last)
 	}
 }

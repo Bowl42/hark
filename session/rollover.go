@@ -26,7 +26,7 @@ func samplesOf(d time.Duration) int64 { return int64(d / time.Millisecond * hark
 //
 // While the previous part is still finishing, cutting is postponed (the grace clock doesn't run); once the part is
 // every+grace long, the session waits for the previous part (overdue) rather than overfilling this one. So a part
-// holds at most every+2*grace of audio.
+// holds at most every+2*grace of unsettled audio, plus one scan chunk (overdue is checked between chunks).
 type cutter struct {
 	every        int64 // part length in samples (> 0)
 	pause, grace int64

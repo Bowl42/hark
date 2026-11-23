@@ -170,7 +170,8 @@ func (s *stream) read() {
 			for k < len(m.Segments) && m.Segments[k].Done {
 				k++
 			}
-			s.out.Update(segs[:k:k], segs[k:])
+			s.out.Update(segs)
+			s.out.Done(k)
 		case "done":
 			if !s.finishing.Load() {
 				s.fail(errEarly)

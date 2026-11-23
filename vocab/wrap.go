@@ -28,25 +28,30 @@ func (w *wrapped) Open(ctx context.Context, req hark.Request, out hark.Output) (
 	return w.e.Open(ctx, req, &rewriteOutput{out: out, rw: rewriter{m: w.m}})
 }
 
-// rewriteOutput: Update may be called concurrently, so replacing and handing downstream happen under one
-// lock and snapshots never get reordered.
+// rewriteOutput: Update and Done may be called concurrently, so replacing and handing downstream happen under one
+// lock and reports never get reordered.
 type rewriteOutput struct {
 	mu  sync.Mutex
 	out hark.Output
 	rw  rewriter
 }
 
-func (o *rewriteOutput) Update(done, live []hark.Segment) {
+func (o *rewriteOutput) Update(segs []hark.Segment) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	// Per the hark.Output contract both slices belong downstream, so they can be rewritten in place. They are
-	// rewritten as one sequence (a word may span the boundary), then the handed-over part leaves the cache.
-	segs := append(append(make([]hark.Segment, 0, len(done)+len(live)), done...), live...)
-	o.rw.apply(segs)
-	copy(done, segs[:len(done)])
-	copy(live, segs[len(done):])
-	o.rw.handOver(len(done))
-	o.out.Update(done, live)
+	o.rw.apply(segs) // per the hark.Output contract, a snapshot handed over belongs downstream, so it can be rewritten in place
+	o.out.Update(segs)
+}
+
+// Done forwards a handover under the same lock as Update, so it stays paired with the snapshot it refers to.
+func (o *rewriteOutput) Done(n int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if n <= 0 {
+		return
+	}
+	o.rw.handOver(n)
+	o.out.Done(n)
 }
 
 // rewriter applies the vocabulary to one stream of snapshots. The engine reports a full snapshot (of what it hasn't

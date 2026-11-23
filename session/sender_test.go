@@ -63,9 +63,11 @@ func TestSenderUpdatesReproduceState(t *testing.T) {
 				o.seal(p)
 				p, next = next, nil
 			case r < 4 && next != nil:
-				next.Update(handover(rng, snap))
+				d, l := handover(rng, snap)
+				report(next, d, l)
 			default:
-				p.Update(handover(rng, snap))
+				d, l := handover(rng, snap)
+				report(p, d, l)
 			}
 			if rng.IntN(4) == 0 {
 				time.Sleep(time.Microsecond) // give freeze (after 0) a chance to advance
@@ -109,7 +111,7 @@ func TestHandoverMatchesModel(t *testing.T) {
 			done, rest := handover(rng, live)
 			model = append(model, done...)
 			want := append(append([]hark.Segment(nil), model...), rest...)
-			p.Update(append([]hark.Segment(nil), done...), append([]hark.Segment(nil), rest...))
+			report(p, append([]hark.Segment(nil), done...), append([]hark.Segment(nil), rest...))
 			drain(t, o, &s, &doc)
 			if doc.Commit != len(model) || len(doc.Segments) != len(want) {
 				t.Fatalf("trial %d step %d: doc %+v, model %d + %d", trial, step, doc, len(model), len(rest))

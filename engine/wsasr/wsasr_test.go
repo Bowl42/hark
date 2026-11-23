@@ -19,22 +19,29 @@ import (
 type recorder struct {
 	mu   sync.Mutex
 	done []hark.Segment
-	last []hark.Segment
+	live []hark.Segment
 	n    int
 }
 
-func (r *recorder) Update(done, live []hark.Segment) {
+func (r *recorder) Update(live []hark.Segment) {
 	r.mu.Lock()
-	r.done = append(r.done, done...)
-	s := append(append([]hark.Segment(nil), r.done...), live...)
-	r.last, r.n = s, r.n+1
+	r.live, r.n = live, r.n+1
 	r.mu.Unlock()
+}
+
+// Done moves the first n live segments to done, as hark does.
+func (r *recorder) Done(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n = max(0, min(n, len(r.live)))
+	r.done = append(r.done, r.live[:n]...)
+	r.live = r.live[n:]
 }
 
 func (r *recorder) get() ([]hark.Segment, int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.last, r.n
+	return append(append([]hark.Segment(nil), r.done...), r.live...), r.n
 }
 
 // plugin starts a fake service: handle gets the connection and the received start.

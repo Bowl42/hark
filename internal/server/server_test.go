@@ -91,7 +91,7 @@ func (s *controlledStream) Write(pcm []byte) error {
 		s.first = int16(binary.LittleEndian.Uint16(pcm))
 	}
 	s.n += int64(len(pcm) / 2)
-	s.out.Update(nil, []hark.Segment{{
+	s.out.Update([]hark.Segment{{
 		Text: fmt.Sprintf("first=%d", s.first), Speaker: "S1", Final: true,
 		Audio: hark.AudioRange{Start: 0, End: s.n},
 	}})
@@ -125,7 +125,7 @@ func (s *pacedStream) Write(pcm []byte) error {
 		return s.ctx.Err()
 	}
 	s.n += len(pcm)
-	s.out.Update(nil, []hark.Segment{{Text: fmt.Sprintf("%dms", s.n/32), Final: true}})
+	s.out.Update([]hark.Segment{{Text: fmt.Sprintf("%dms", s.n/32), Final: true}})
 	return nil
 }
 func (*pacedStream) Finish(context.Context) error { return nil }
@@ -737,7 +737,7 @@ func (s slowStream) Finish(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	s.out.Update(nil, []hark.Segment{{Text: "x", Final: true}})
+	s.out.Update([]hark.Segment{{Text: "x", Final: true}})
 	return nil
 }
 func (slowStream) Close() error { return nil }
@@ -793,7 +793,7 @@ func (s *wordyStream) Write(pcm []byte) error {
 	n := len(s.segs)
 	s.segs = append(s.segs, hark.Segment{Text: fmt.Sprintf("<%d %s \"q\">", n, strings.Repeat("w", 90)), Final: true,
 		Audio: hark.AudioRange{Start: int64(n * 320), End: int64(n*320 + 320)}})
-	s.out.Update(nil, append([]hark.Segment(nil), s.segs...))
+	s.out.Update(append([]hark.Segment(nil), s.segs...))
 	return nil
 }
 func (*wordyStream) Finish(context.Context) error { return nil }

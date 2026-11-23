@@ -72,7 +72,8 @@ func (t *transcript) ingest(snap []hark.Segment, now time.Time) (changed, aligne
 }
 
 // retire removes the first k segments, which the engine has handed over, and returns them: they are committed for
-// good and leave the transcript. Watermarks shift down by k; the remaining segments keep their timers. The
+// good and leave the transcript. Watermarks shift down by k (stable then extends over final segments that only the
+// retired prefix held back); the remaining segments keep their timers. The
 // remainder gets fresh storage (readers may still hold the old slices, which are never modified).
 func (t *transcript) retire(k int) []api.Segment {
 	out := t.segs[:k:k]
@@ -80,6 +81,9 @@ func (t *transcript) retire(k int) []api.Segment {
 	t.finals = append([]bool(nil), t.finals[k:]...)
 	t.since = append([]time.Time(nil), t.since[k:]...)
 	t.stable, t.commit = max(t.stable, k)-k, max(t.commit, k)-k
+	for t.stable < len(t.segs) && t.finals[t.stable] { // the retired prefix may have been what kept the rest unstable
+		t.stable++
+	}
 	return out
 }
 

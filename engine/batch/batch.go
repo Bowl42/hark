@@ -405,7 +405,8 @@ func (s *stream) report() {
 	live, _ := segments(s.sents[k:], edge)
 	s.sents = slices.Delete(s.sents, 0, k) // also clears the vacated pointers
 	s.edge = edge
-	s.out.Update(done, live)
+	s.out.Update(append(done, live...))
+	s.out.Done(len(done))
 }
 
 // segments turns sentences into segments: sentences without text are omitted, and a space is added between

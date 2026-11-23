@@ -44,26 +44,29 @@ type AudioRange struct {
 }
 
 // Output is where an engine reports results. hark provides it.
+//
+// Calls must be ordered: an engine reports from one goroutine at a time (or under its own lock), so that a Done
+// refers to the Update the engine means. hark processes every call synchronously and never blocks.
 type Output interface {
-	// Update reports the engine's results: done are segments handed over for good, live is a **full snapshot of
-	// every segment after them** (not a delta). hark works out what changed and pushes that downstream.
+	// Update reports a **full snapshot of the engine's current segments** (not a delta): everything it hasn't
+	// handed over with Done. hark works out which segments changed and pushes that downstream; the engine need
+	// not care. hark only guarantees to push the latest snapshot; snapshots in quick succession may be coalesced.
 	//
-	// Handing over is optional but keeps long streams cheap: a done segment will never change and is never
-	// reported again (later updates start after it), so the engine can forget it, and hark commits it right away
-	// under any commit policy. (Under freeze, text hark has already frozen takes precedence: if a handover doesn't
-	// line up with it segment by segment, hark keeps the segments as part of the full snapshot and applies the
-	// usual freeze normalization, as for an engine that never hands over; retiring them is deferred.) Done segments are appended after those handed over before, in order; done implies
-	// Final. An engine that can't tell when a segment is final for good just reports Update(nil, everything);
-	// such streams are still bounded, by rollover (see session.Options.Rollover).
+	// Ownership: after the call, the segments slice belongs to hark, which may modify segments in place
+	// (e.g. personal vocabulary replacement). The engine must not read or write it afterwards, and should
+	// build a new slice for every report.
+	Update(segments []Segment)
+
+	// Done hands over the first n segments of the outstanding snapshot (the last Update, minus what earlier Done
+	// calls handed over) for good: they will never change and the engine never reports them again, so later
+	// snapshots start after them and the engine can forget them. hark commits them right away under any commit
+	// policy. (Under freeze, text hark has already frozen takes precedence: if a handover doesn't line up with it
+	// segment by segment, hark keeps the segments as part of the snapshot and applies the usual freeze
+	// normalization; retiring them is deferred.) n is clamped to what is outstanding; n <= 0 does nothing.
 	//
-	// It may be called from any goroutine and never blocks. Every call's done segments are kept; of the live
-	// snapshots, hark only guarantees to push the latest (snapshots in quick succession may be coalesced).
-	// Calls must be ordered: a call's live snapshot must follow everything handed over up to that call.
-	//
-	// Ownership: after the call, both slices belong to hark, which may modify segments in place (e.g. personal
-	// vocabulary replacement). The engine must not read or write them afterwards, and should build new slices
-	// for every report.
-	Update(done, live []Segment)
+	// It is optional but keeps long streams cheap: an engine that never calls it reports everything every time,
+	// and such streams are bounded by rollover instead (see session.Options.Rollover).
+	Done(n int)
 }
 
 // Request holds the parameters of one session.
@@ -99,7 +102,7 @@ type Stream interface {
 	// An engine that needs to keep it must copy it.
 	Write(pcm []byte) error
 	// Finish signals the end of audio and blocks until upstream finalizes.
-	// The final snapshot must have been reported through Output.Update before it returns.
+	// The final results must have been reported (Output.Update, and Done if used) before it returns.
 	// It should return promptly when ctx expires (finalize timeout).
 	Finish(ctx context.Context) error
 	// Close releases resources and aborts the session if it has not finished.

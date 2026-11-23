@@ -22,15 +22,24 @@ import (
 type recorder struct {
 	mu   sync.Mutex
 	done []hark.Segment
+	live []hark.Segment
 	snap [][]hark.Segment
 }
 
-func (r *recorder) Update(done, live []hark.Segment) {
+func (r *recorder) Update(live []hark.Segment) {
 	r.mu.Lock()
-	r.done = append(r.done, done...)
-	s := append(append([]hark.Segment(nil), r.done...), live...)
-	r.snap = append(r.snap, s)
+	r.live = live
+	r.snap = append(r.snap, append(append([]hark.Segment(nil), r.done...), live...))
 	r.mu.Unlock()
+}
+
+// Done moves the first n live segments to done, as hark does.
+func (r *recorder) Done(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n = max(0, min(n, len(r.live)))
+	r.done = append(r.done, r.live[:n]...)
+	r.live = r.live[n:]
 }
 
 func (r *recorder) all() [][]hark.Segment {

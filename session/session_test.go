@@ -135,7 +135,7 @@ func TestVocabAndOptions(t *testing.T) {
 	if e.req.SessionID != "x" || e.req.Options["hotwords"] == nil {
 		t.Fatalf("request = %+v", e.req)
 	}
-	e.out.Update(nil, []hark.Segment{{Text: "去公园", Final: true}})
+	e.out.Update([]hark.Segment{{Text: "去公园", Final: true}})
 	r := read(t, s)
 	s.Finish(context.Background())
 	r.wait(t)
@@ -228,10 +228,10 @@ func TestFreezeIndependentOfReader(t *testing.T) {
 		if readEarly {
 			r = read(t, s)
 		}
-		e.out.Update(nil, []hark.Segment{{Text: "甲。", Final: true}})
-		time.Sleep(120 * time.Millisecond)                                        // 甲 is due and should freeze
-		e.out.Update(nil, []hark.Segment{{Text: "乙。", Final: true}, {Text: "丙"}}) // rewrites frozen content: no timestamps, so the whole snapshot is discarded
-		e.out.Update(nil, []hark.Segment{{Text: "甲。", Final: true}, {Text: "丙"}})
+		e.out.Update([]hark.Segment{{Text: "甲。", Final: true}})
+		time.Sleep(120 * time.Millisecond)                                   // 甲 is due and should freeze
+		e.out.Update([]hark.Segment{{Text: "乙。", Final: true}, {Text: "丙"}}) // rewrites frozen content: no timestamps, so the whole snapshot is discarded
+		e.out.Update([]hark.Segment{{Text: "甲。", Final: true}, {Text: "丙"}})
 		if !readEarly {
 			r = read(t, s)
 		}
@@ -250,7 +250,7 @@ func TestWriteErrorEndsSession(t *testing.T) {
 	e := &scripted{}
 	s, _ := session.Open(context.Background(), e, hark.Request{}, session.Options{})
 	defer s.Close()
-	e.out.Update(nil, []hark.Segment{{Text: "部分"}})
+	e.out.Update([]hark.Segment{{Text: "部分"}})
 	e.writeErr = errors.New("upstream gone")
 	if err := s.Write(make([]byte, 2)); err == nil || !strings.Contains(err.Error(), "upstream gone") {
 		t.Fatalf("write err = %v", err)
@@ -352,7 +352,7 @@ func TestNextContextAndOwnership(t *testing.T) {
 	if _, err := s.Next(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v", err)
 	}
-	e.out.Update(nil, []hark.Segment{{Text: "ab", Audio: hark.AudioRange{Start: 0, End: 10}}})
+	e.out.Update([]hark.Segment{{Text: "ab", Audio: hark.AudioRange{Start: 0, End: 10}}})
 	u, err := s.Next(context.Background())
 	if err != nil || u.Rev != 1 {
 		t.Fatalf("u=%+v err=%v", u, err)
@@ -361,7 +361,7 @@ func TestNextContextAndOwnership(t *testing.T) {
 	u.Ops[0].Insert[0].AudioRange.EndSample = 999
 	snap := s.Snapshot()
 	snap.Segments[0].AudioRange.StartSample = 5
-	e.out.Update(nil, []hark.Segment{{Text: "abc", Audio: hark.AudioRange{Start: 0, End: 10}}})
+	e.out.Update([]hark.Segment{{Text: "abc", Audio: hark.AudioRange{Start: 0, End: 10}}})
 	u2, _ := s.Next(context.Background())
 	var d api.Doc
 	d.Apply(api.Update{Type: api.TypeUpdate, Rev: 1, Ops: []api.Op{{Insert: []api.Segment{{Text: "ab", AudioRange: api.AudioRange{EndSample: 10}}}}}})
@@ -403,7 +403,7 @@ func TestFreezeOnAbort(t *testing.T) {
 			if withReader {
 				r = read(t, s)
 			}
-			e.out.Update(nil, []hark.Segment{{Text: "甲。", Final: true}, {Text: "乙"}})
+			e.out.Update([]hark.Segment{{Text: "甲。", Final: true}, {Text: "乙"}})
 			time.Sleep(80 * time.Millisecond)
 			switch how {
 			case "close":
@@ -431,7 +431,7 @@ func TestCancelWinsOverFinish(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &scripted{onFinish: cancel}
 	s, _ := session.Open(ctx, e, hark.Request{}, session.Options{})
-	e.out.Update(nil, []hark.Segment{{Text: "甲"}})
+	e.out.Update([]hark.Segment{{Text: "甲"}})
 	if err := s.Finish(context.Background()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("finish err = %v", err)
 	}

@@ -22,9 +22,9 @@ func TestPartJoin(t *testing.T) {
 	} {
 		o := newOutput(api.Commit{})
 		p0 := o.newPart(0)
-		p0.Update(nil, segs(c.a))
+		p0.Update(segs(c.a))
 		p1 := o.newPart(1000)
-		p1.Update(nil, segs(c.b))
+		p1.Update(segs(c.b))
 		o.seal(p0)
 		o.finish()
 		got := ""
@@ -49,9 +49,9 @@ func segs(texts []string) []hark.Segment {
 func TestSpeakerLabels(t *testing.T) {
 	o := newOutput(api.Commit{})
 	p0 := o.newPart(0)
-	p0.Update(nil, []hark.Segment{{Text: "a", Speaker: "S1#1"}, {Text: "b", Speaker: "S1"}})
+	p0.Update([]hark.Segment{{Text: "a", Speaker: "S1#1"}, {Text: "b", Speaker: "S1"}})
 	p1 := o.newPart(1000)
-	p1.Update(nil, []hark.Segment{{Text: "c", Speaker: "S1"}})
+	p1.Update([]hark.Segment{{Text: "c", Speaker: "S1"}})
 	o.seal(p0)
 	var got []string
 	for _, g := range o.snapshot().Segments {
@@ -84,7 +84,7 @@ func TestReleaseKeepsJoin(t *testing.T) {
 		var s sender
 		var doc api.Doc
 		p0 := o.newPart(0)
-		p0.Update(nil, segs([]string{"Hello."}))
+		p0.Update(segs([]string{"Hello."}))
 		p1 := o.newPart(1000)
 		o.seal(p0)
 		drain(t, o, &s, &doc)
@@ -93,10 +93,10 @@ func TestReleaseKeepsJoin(t *testing.T) {
 		}
 		if abort { // p1 stays empty; p2's text is gated when the session aborts
 			p2 := o.newPart(2000)
-			p2.Update(nil, segs([]string{"World"}))
+			p2.Update(segs([]string{"World"}))
 			o.close()
 		} else {
-			p1.Update(nil, segs([]string{"World"}))
+			p1.Update(segs([]string{"World"}))
 			o.finish()
 		}
 		drain(t, o, &s, &doc)
@@ -113,7 +113,7 @@ func TestReleaseAfterFrozenSeal(t *testing.T) {
 	var s sender
 	var doc api.Doc
 	p0 := o.newPart(0)
-	p0.Update(nil, []hark.Segment{{Text: "甲。", Final: true}})
+	p0.Update([]hark.Segment{{Text: "甲。", Final: true}})
 	time.Sleep(time.Millisecond)
 	drain(t, o, &s, &doc)
 	if doc.Commit != 1 {
@@ -148,14 +148,14 @@ func TestHandoverRetires(t *testing.T) {
 	var s sender
 	var doc api.Doc
 	p := o.newPart(0)
-	p.Update(nil, []hark.Segment{seg("a", true), seg("b", false)})
+	p.Update([]hark.Segment{seg("a", true), seg("b", false)})
 	drain(t, o, &s, &doc)
-	p.Update([]hark.Segment{seg("a", true)}, []hark.Segment{seg("b", false)}) // same text: only the handover is new
+	report(p, []hark.Segment{seg("a", true)}, []hark.Segment{seg("b", false)}) // same text: only the handover is new
 	drain(t, o, &s, &doc)
 	if doc.Commit != 1 || joined(doc.Segments) != "a|b|" || len(p.tr.segs) != 1 || len(o.sealed) != 0 {
 		t.Fatalf("doc %+v, part holds %d, sealed %d", doc, len(p.tr.segs), len(o.sealed))
 	}
-	p.Update(nil, []hark.Segment{seg("b2", false)})
+	p.Update([]hark.Segment{seg("b2", false)})
 	o.finish()
 	drain(t, o, &s, &doc)
 	if joined(doc.Segments) != "a|b2|" || doc.Commit != 2 {
@@ -169,8 +169,8 @@ func TestHandoverNoJoinWithinStream(t *testing.T) {
 	var s sender
 	var doc api.Doc
 	p := o.newPart(0)
-	p.Update([]hark.Segment{seg("hel", true)}, nil)
-	p.Update(nil, []hark.Segment{seg("lo", false)})
+	report(p, []hark.Segment{seg("hel", true)}, nil)
+	p.Update([]hark.Segment{seg("lo", false)})
 	o.finish()
 	drain(t, o, &s, &doc)
 	if doc.Text() != "hello" {
@@ -184,18 +184,18 @@ func TestHandoverBehindFrozen(t *testing.T) {
 	var s sender
 	var doc api.Doc
 	p := o.newPart(0)
-	p.Update(nil, []hark.Segment{seg("a", true), seg("b", true)})
+	p.Update([]hark.Segment{seg("a", true), seg("b", true)})
 	time.Sleep(time.Millisecond)
 	drain(t, o, &s, &doc)
 	if doc.Commit != 2 {
 		t.Fatalf("not frozen: %+v", doc)
 	}
-	p.Update([]hark.Segment{seg("a", true)}, []hark.Segment{seg("b", true), seg("c", false)})
+	report(p, []hark.Segment{seg("a", true)}, []hark.Segment{seg("b", true), seg("c", false)})
 	drain(t, o, &s, &doc)
 	if len(p.tr.segs) != 2 || p.tr.commit != 1 || joined(doc.Segments) != "a|b|c|" || doc.Commit != 2 {
 		t.Fatalf("part %+v commit %d, doc %+v", p.tr.segs, p.tr.commit, doc)
 	}
-	p.Update(nil, []hark.Segment{seg("b", true), seg("cd", false)})
+	p.Update([]hark.Segment{seg("b", true), seg("cd", false)})
 	o.finish()
 	drain(t, o, &s, &doc)
 	if joined(doc.Segments) != "a|b|cd|" {
@@ -223,15 +223,15 @@ func TestHandoverMisaligned(t *testing.T) {
 		for _, x := range c.done {
 			done = append(done, seg(x, true))
 		}
-		p.Update(nil, frozen)
+		p.Update(frozen)
 		time.Sleep(time.Millisecond)
 		drain(t, o, &s, &doc)
-		p.Update(done, []hark.Segment{seg("丙", false)})
+		report(p, done, []hark.Segment{seg("丙", false)})
 		drain(t, o, &s, &doc)
 		if doc.Text() != "甲乙丙" || len(p.held) != len(c.done) {
 			t.Fatalf("%v: doc %q, held %d", c, doc.Text(), len(p.held))
 		}
-		p.Update(nil, []hark.Segment{seg("丙丁", false)})
+		p.Update([]hark.Segment{seg("丙丁", false)})
 		o.finish()
 		drain(t, o, &s, &doc)
 		if doc.Text() != "甲乙丙丁" || doc.Commit != len(doc.Segments) {
@@ -248,10 +248,10 @@ func TestHandoverGated(t *testing.T) {
 		var s sender
 		var doc api.Doc
 		p0 := o.newPart(0)
-		p0.Update(nil, []hark.Segment{seg("甲", false)})
+		p0.Update([]hark.Segment{seg("甲", false)})
 		p1 := o.newPart(1000)
-		p1.Update([]hark.Segment{{Text: "乙", Audio: hark.AudioRange{Start: 0, End: 10}}}, nil)
-		p1.Update([]hark.Segment{seg("丙", true)}, nil)
+		report(p1, []hark.Segment{{Text: "乙", Audio: hark.AudioRange{Start: 0, End: 10}}}, nil)
+		report(p1, []hark.Segment{seg("丙", true)}, nil)
 		if abort {
 			o.close()
 		} else {
@@ -278,16 +278,16 @@ func TestHandoverSettled(t *testing.T) {
 	p := o.newPart(16000)
 	p.fed.Store(8000)
 	// engines report audio ranges relative to their own stream
-	p.Update([]hark.Segment{{Text: "a", Audio: hark.AudioRange{Start: 0, End: 4000}}}, nil)
+	report(p, []hark.Segment{{Text: "a", Audio: hark.AudioRange{Start: 0, End: 4000}}}, nil)
 	if got := p.settled.Load(); got != 4000 {
 		t.Fatalf("timed: settled %d", got)
 	}
-	p.Update([]hark.Segment{{Text: "b", Audio: hark.AudioRange{Start: 4000, End: 99999}}}, nil)
+	report(p, []hark.Segment{{Text: "b", Audio: hark.AudioRange{Start: 4000, End: 99999}}}, nil)
 	if got := p.settled.Load(); got != 8000 {
 		t.Fatalf("future end: settled %d, want clamped to 8000", got)
 	}
 	p.fed.Store(12000)
-	p.Update([]hark.Segment{{Text: "c"}}, nil)
+	report(p, []hark.Segment{{Text: "c"}}, nil)
 	if got := p.settled.Load(); got != 12000 {
 		t.Fatalf("untimed: settled %d", got)
 	}
@@ -305,9 +305,9 @@ func TestHandoverSettledWhenReceived(t *testing.T) {
 	p0 := o.newPart(0)
 	p1 := o.newPart(1000)
 	p1.fed.Store(16000)
-	p1.Update([]hark.Segment{{Text: "甲"}}, nil) // untimed: settles what the engine had then
+	report(p1, []hark.Segment{{Text: "甲"}}, nil) // untimed: settles what the engine had then
 	p1.fed.Store(160000)
-	p1.Update(nil, []hark.Segment{{Text: "乙"}})
+	p1.Update([]hark.Segment{{Text: "乙"}})
 	o.seal(p0)
 	if got := p1.settled.Load(); got != 16000 {
 		t.Fatalf("settled %d, want 16000", got)
@@ -326,5 +326,92 @@ func TestCutterGraceResets(t *testing.T) {
 	}
 	if c.due != vad.Frame {
 		t.Fatalf("due %d, want a fresh period", c.due)
+	}
+}
+
+// report is an engine's Update of done followed by live, then Done for the done part.
+func report(out hark.Output, done, live []hark.Segment) {
+	out.Update(append(append([]hark.Segment(nil), done...), live...))
+	out.Done(len(done))
+}
+
+// Done counts from what is outstanding: repeated calls hand over one segment after another; it is clamped, and
+// does nothing before any Update or for n <= 0.
+func TestDoneOutstanding(t *testing.T) {
+	o := newOutput(api.Commit{})
+	var s sender
+	var doc api.Doc
+	p := o.newPart(0)
+	p.Done(1)
+	p.Done(-1)
+	p.Update([]hark.Segment{seg("a", false), seg("b", false), seg("c", false)})
+	p.Done(1)
+	p.Done(1)
+	drain(t, o, &s, &doc)
+	if doc.Commit != 2 || joined(doc.Segments) != "a|b|c|" || len(p.cur) != 1 {
+		t.Fatalf("doc %+v, outstanding %d", doc, len(p.cur))
+	}
+	p.Done(9)
+	drain(t, o, &s, &doc)
+	if doc.Commit != 3 || len(p.cur) != 0 || len(p.tr.segs) != 0 {
+		t.Fatalf("clamped: doc %+v, part %d", doc, len(p.tr.segs))
+	}
+}
+
+// A Done after a snapshot freeze rejected doesn't normalize it again: the conflict is counted once, and the
+// handover is held for the next snapshot.
+func TestDoneAfterConflictCountsOnce(t *testing.T) {
+	o := newOutput(api.Commit{Policy: api.CommitFreeze})
+	p := o.newPart(0)
+	p.Update([]hark.Segment{seg("甲。", true)})
+	time.Sleep(time.Millisecond)
+	o.snapshot()                             // freeze it
+	p.Update([]hark.Segment{seg("乙", true)}) // rewrites frozen text without timing: rejected
+	before := o.dropped()
+	p.Done(1)
+	if o.dropped() != before || len(p.held) != 1 {
+		t.Fatalf("dropped %d → %d, held %d", before, o.dropped(), len(p.held))
+	}
+}
+
+// When a gated part is published, what it hasn't handed over yet becomes its outstanding snapshot, so a later Done
+// refers to it.
+func TestDoneAfterPublish(t *testing.T) {
+	o := newOutput(api.Commit{})
+	var s sender
+	var doc api.Doc
+	p0 := o.newPart(0)
+	p1 := o.newPart(1000)
+	p1.Update([]hark.Segment{seg("x", false), seg("y", false)})
+	p1.Done(1)
+	o.seal(p0)
+	p1.Done(1)
+	drain(t, o, &s, &doc)
+	if doc.Commit != 2 || joined(doc.Segments) != "x|y|" {
+		t.Fatalf("doc %+v", doc)
+	}
+}
+
+// Handing over a segment that wasn't final makes the final ones after it stable at once, and freeze can then
+// commit them without another update.
+func TestDoneUnblocksStable(t *testing.T) {
+	for _, freeze := range []bool{false, true} {
+		c := api.Commit{}
+		if freeze {
+			c = api.Commit{Policy: api.CommitFreeze}
+		}
+		o := newOutput(c)
+		var s sender
+		var doc api.Doc
+		p := o.newPart(0)
+		p.Update([]hark.Segment{seg("a", false), seg("b", true)})
+		drain(t, o, &s, &doc)
+		p.Done(1)
+		time.Sleep(time.Millisecond)
+		drain(t, o, &s, &doc)
+		want := map[bool]int{false: 1, true: 2}[freeze]
+		if doc.Stable != 2 || doc.Commit != want {
+			t.Fatalf("freeze %v: stable %d commit %d, want 2 and %d", freeze, doc.Stable, doc.Commit, want)
+		}
 	}
 }

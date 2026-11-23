@@ -69,7 +69,7 @@ type Options struct {
 	// committed. Engines that keep handing over finished segments are therefore rarely rolled over; those that never
 	// hand over are rolled over every Rollover of audio. Zero means DefaultRollover; it can't be turned off.
 	// When audio arrives faster than the previous stream finalizes, a cut is postponed, so a stream can receive up to
-	// Rollover plus two minutes (and Write waits for the previous stream rather than exceed that).
+	// about Rollover plus two minutes (and Write waits for the previous stream rather than exceed that).
 	Rollover time.Duration
 	// PartFinishTimeout bounds finalizing a stream at rollover; exceeding it fails the session. Default 15s.
 	PartFinishTimeout time.Duration

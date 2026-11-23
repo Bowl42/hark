@@ -5,7 +5,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +17,12 @@ import (
 	"github.com/Bowl42/hark/api"
 	"github.com/Bowl42/hark/session"
 )
+
+// TestMain silences the session's log (rollovers are logged at info level).
+func TestMain(m *testing.M) {
+	slog.SetDefault(slog.New(slog.DiscardHandler))
+	os.Exit(m.Run())
+}
 
 // parts is an engine that records every stream it opens. Each stream reports one segment covering the audio it
 // received; text, speaker and finish behavior can be customized per stream.
@@ -63,7 +71,7 @@ func (st *partStream) report(final bool) {
 	if st.e.text != nil {
 		text = st.e.text(st.n)
 	}
-	st.out.Update(nil, []hark.Segment{{Text: text, Final: final, Speaker: st.e.speaker, Audio: hark.AudioRange{Start: 0, End: int64(st.bytes / 2)}}})
+	st.out.Update([]hark.Segment{{Text: text, Final: final, Speaker: st.e.speaker, Audio: hark.AudioRange{Start: 0, End: int64(st.bytes / 2)}}})
 }
 
 func (st *partStream) Write(pcm []byte) error {
@@ -378,8 +386,10 @@ func TestRolloverHugeWrite(t *testing.T) {
 		t.Fatalf("%d parts", len(got))
 	}
 	for _, st := range got {
-		if st.bytes > 122_000*32 { // rollover + 2 × grace + one scan chunk
-			t.Errorf("part %d got %ds of audio", st.n, st.bytes/32000)
+		// rollover + 2 × grace, plus one scan chunk (the overdue check happens between chunks) and the frame on
+		// which the forced cut is decided
+		if st.bytes > (122_000+20)*32 {
+			t.Errorf("part %d got %.2fs of audio", st.n, float64(st.bytes)/32000)
 		}
 	}
 }
@@ -578,17 +588,17 @@ func (st *handingStream) Write(pcm []byte) error {
 	}
 	st.pos += int64(len(pcm) / 2)
 	if st.h.stopAfter == 0 || st.writes <= st.h.stopAfter {
-		st.out.Update(append(st.live, seg), nil) // everything so far is handed over
+		report(st.out, append(st.live, seg), nil) // everything so far is handed over
 		st.live = nil
 	} else {
 		st.live = append(st.live, seg)
-		st.out.Update(nil, append([]hark.Segment(nil), st.live...))
+		st.out.Update(append([]hark.Segment(nil), st.live...))
 	}
 	return nil
 }
 
 func (st *handingStream) Finish(context.Context) error {
-	st.out.Update(st.live, nil)
+	report(st.out, st.live, nil)
 	return nil
 }
 
@@ -625,4 +635,10 @@ func TestHandoverStopsThenRollover(t *testing.T) {
 	if n := len(e.all()); n < 2 {
 		t.Fatalf("%d parts: rollover never happened after handovers stopped", n)
 	}
+}
+
+// report is an engine's Update of done followed by live, then Done for the done part.
+func report(out hark.Output, done, live []hark.Segment) {
+	out.Update(append(append([]hark.Segment(nil), done...), live...))
+	out.Done(len(done))
 }
