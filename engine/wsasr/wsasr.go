@@ -2,7 +2,8 @@
 // listening as a hark backend, through configuration alone, with no Go code.
 //
 // It simply carries the hark.Engine contract over the network: hark sends audio, the service sends back
-// **all current sentences** every time, and hark computes the diffs, rewrites, stable and commit. One
+// **all current sentences** every time (except those it has handed over, see done below), and hark computes the
+// diffs, rewrites, stable and commit. One
 // connection per session, with hark as the client:
 //
 //	connect  GET <url>, with Authorization: Bearer <token> when a token is configured
@@ -26,6 +27,11 @@
 //     spaces put them in text (e.g. "Hello", " world.")
 //   - final: optional; the service considers this sentence settled, as a hint only; hark decides when to promise
 //     downstream that it will no longer change
+//   - done: optional; the service hands this sentence over for good: it will never change, hark commits it (right
+//     away, unless it conflicts with text hark has already frozen, which takes precedence), and the service must not send it again (later results start after it), so it can forget it. Only
+//     the leading run of done segments counts: a done on a segment after one that isn't done is ignored
+//     completely (the segment stays live, and the service must keep sending it). Services that never set it
+//     simply send everything every time; long sessions are then bounded by rollover instead
 //   - speaker: optional, the speaker
 //   - audio_range: optional, {"start_sample":0,"end_sample":16000}, a half-open interval [start, end), counted from
 //     the session's first sample
@@ -111,6 +117,7 @@ type reply struct {
 type segment struct {
 	Text       string `json:"text"`
 	Final      bool   `json:"final"`
+	Done       bool   `json:"done"`
 	Speaker    string `json:"speaker"`
 	AudioRange struct {
 		StartSample int64 `json:"start_sample"`
@@ -159,7 +166,11 @@ func (s *stream) read() {
 				s.fail(err)
 				return
 			}
-			s.out.Update(segs)
+			k := 0
+			for k < len(m.Segments) && m.Segments[k].Done {
+				k++
+			}
+			s.out.Update(segs[:k:k], segs[k:])
 		case "done":
 			if !s.finishing.Load() {
 				s.fail(errEarly)

@@ -17,8 +17,12 @@ const (
 func samplesOf(d time.Duration) int64 { return int64(d / time.Millisecond * hark.SampleRate / 1000) }
 
 // cutter decides where to end a part. It looks at the audio as it is written (20ms frames, volume VAD) and keeps no
-// audio beyond a partial frame. Once the part is at least every long, it cuts at the first pause; if none comes within
-// grace of audio while cutting is allowed, it cuts wherever it is. Cuts fall on frame boundaries.
+// audio beyond a partial frame. Once the part holds at least every of unsettled audio, it cuts at the first pause; if
+// none comes within grace of audio while cutting is allowed, it cuts wherever it is. Cuts fall on frame boundaries.
+//
+// Unsettled audio is what the engine hasn't handed over the results for (settled, see part): an engine that keeps
+// handing over finished segments keeps its stream bounded by itself, so it is only cut when it stops doing so, for
+// example during a long silence (harmless) or when it never hands over at all (the clock then runs from the start).
 //
 // While the previous part is still finishing, cutting is postponed (the grace clock doesn't run); once the part is
 // every+grace long, the session waits for the previous part (overdue) rather than overfilling this one. So a part
@@ -37,12 +41,19 @@ func newCutter(every time.Duration) cutter {
 	return cutter{every: samplesOf(every), pause: samplesOf(rolloverPause), grace: samplesOf(rolloverGrace)}
 }
 
-// overdue reports whether the part has run past every+grace (a cut is due as soon as it's allowed).
-func (c *cutter) overdue() bool { return c.length >= c.every+c.grace }
+// unsettled returns how much of the part's audio the engine hasn't settled (settled is clamped to what was analysed).
+func (c *cutter) unsettled(settled int64) int64 { return c.length - min(settled, c.length) }
+
+// overdue reports whether the part holds more than every+grace unsettled audio (a cut is due as soon as it's allowed).
+func (c *cutter) overdue(settled int64) bool { return c.unsettled(settled) >= c.every+c.grace }
 
 // scan analyses pcm and returns how many bytes of it belong to the current part, and whether the part should end
-// right after them. allow=false postpones cutting (the previous part is still finishing).
-func (c *cutter) scan(pcm []byte, allow bool) (int, bool) {
+// right after them. allow=false postpones cutting (the previous part is still finishing). settled is the part's
+// settled position when the scan starts.
+func (c *cutter) scan(pcm []byte, allow bool, settled int64) (int, bool) {
+	if c.unsettled(settled) < c.every {
+		c.due = 0 // the engine caught up since the last scan
+	}
 	for i := 0; ; {
 		need := 2*vad.Frame - len(c.frame)
 		if len(pcm)-i < need {
@@ -58,7 +69,11 @@ func (c *cutter) scan(pcm []byte, allow bool) (int, bool) {
 		}
 		c.frame = c.frame[:0]
 		c.length += vad.Frame
-		if !allow || c.length < c.every {
+		if c.unsettled(settled) < c.every {
+			c.due = 0 // the engine caught up: no cut is due any more
+			continue
+		}
+		if !allow {
 			continue
 		}
 		if c.silent >= c.pause || c.due >= c.grace {

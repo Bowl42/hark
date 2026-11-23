@@ -4,7 +4,7 @@ tokens:
   - ${HARK_TOKEN}
 data_dir: /data       # Personal vocabulary: data_dir/vocab.db (SQLite), stored in the hark-data volume. Disabled if unset
 # max_session: 2h     # Maximum duration of a single session; unlimited by default
-# rollover: 2m        # Long sessions: move to a fresh engine stream at a pause after this much audio
+# rollover: 2m        # Long sessions: move to a fresh engine stream at a pause once one holds this much unfinalized audio
 # spool_dir: /tmp     # output.mode final: where committed text waits for track_end beyond 64KB (default: system temp dir)
 # finish_timeout: 15s # How long to wait for the engine to finalize after the client sends finish
 

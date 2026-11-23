@@ -8,3 +8,6 @@
 
 # Test audio
 *.wav
+
+# Python bytecode (examples/plugins)
+__pycache__/

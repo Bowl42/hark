@@ -343,7 +343,7 @@ func (s *stream) read() {
 
 // publish hands over a new slice every time: once handed to Output, it belongs to hark.
 func (s *stream) publish() {
-	s.out.Update(append([]hark.Segment(nil), s.last...))
+	s.out.Update(nil, append([]hark.Segment(nil), s.last...))
 }
 
 func (s *stream) fail(err error) {

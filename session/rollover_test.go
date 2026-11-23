@@ -63,7 +63,7 @@ func (st *partStream) report(final bool) {
 	if st.e.text != nil {
 		text = st.e.text(st.n)
 	}
-	st.out.Update([]hark.Segment{{Text: text, Final: final, Speaker: st.e.speaker, Audio: hark.AudioRange{Start: 0, End: int64(st.bytes / 2)}}})
+	st.out.Update(nil, []hark.Segment{{Text: text, Final: final, Speaker: st.e.speaker, Audio: hark.AudioRange{Start: 0, End: int64(st.bytes / 2)}}})
 }
 
 func (st *partStream) Write(pcm []byte) error {
@@ -542,5 +542,87 @@ func TestRolloverDefault(t *testing.T) {
 	}
 	if n := len(e.all()); n != 2 {
 		t.Fatalf("%d parts, want 2", n)
+	}
+}
+
+// handing reports each Write's audio as one segment and hands everything before it over, synchronously inside
+// Write; timed controls whether segments carry audio ranges. If stopAfter > 0 it stops handing over after that
+// many writes (then it only reports live segments).
+type handing struct {
+	parts
+	timed     bool
+	stopAfter int
+}
+
+type handingStream struct {
+	*partStream
+	h      *handing
+	writes int
+	pos    int64
+	live   []hark.Segment
+}
+
+func (h *handing) Open(ctx context.Context, req hark.Request, out hark.Output) (hark.Stream, error) {
+	st, _ := h.parts.Open(ctx, req, out)
+	return &handingStream{partStream: st.(*partStream), h: h}, nil
+}
+
+func (st *handingStream) Write(pcm []byte) error {
+	st.e.mu.Lock()
+	st.bytes += len(pcm)
+	st.e.mu.Unlock()
+	st.writes++
+	seg := hark.Segment{Text: "x"}
+	if st.h.timed {
+		seg.Audio = hark.AudioRange{Start: st.pos, End: st.pos + int64(len(pcm)/2)}
+	}
+	st.pos += int64(len(pcm) / 2)
+	if st.h.stopAfter == 0 || st.writes <= st.h.stopAfter {
+		st.out.Update(append(st.live, seg), nil) // everything so far is handed over
+		st.live = nil
+	} else {
+		st.live = append(st.live, seg)
+		st.out.Update(nil, append([]hark.Segment(nil), st.live...))
+	}
+	return nil
+}
+
+func (st *handingStream) Finish(context.Context) error {
+	st.out.Update(st.live, nil)
+	return nil
+}
+
+// An engine that keeps handing over is never rolled over: the rollover clock only counts unsettled audio. This holds
+// with and without audio ranges (untimed handovers settle what the engine was given, published before Write).
+func TestHandoverAvoidsRollover(t *testing.T) {
+	for _, timed := range []bool{true, false} {
+		e := &handing{timed: timed}
+		s, _ := session.Open(context.Background(), e, hark.Request{}, session.Options{Rollover: time.Second})
+		r := read(t, s)
+		write(t, s, speech(200_000)) // far past rollover + grace, never a pause
+		if err := s.Finish(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		r.wait(t)
+		if n := len(e.all()); n != 1 {
+			t.Fatalf("timed %v: %d parts, want 1", timed, n)
+		}
+		if r.doc.Commit != len(r.doc.Segments) || len(r.doc.Segments) < 100 {
+			t.Fatalf("timed %v: doc %d segments, commit %d", timed, len(r.doc.Segments), r.doc.Commit)
+		}
+	}
+}
+
+// Once an engine stops handing over, the clock runs from the last handover: rollover still happens.
+func TestHandoverStopsThenRollover(t *testing.T) {
+	e := &handing{stopAfter: 3}
+	s, _ := session.Open(context.Background(), e, hark.Request{}, session.Options{Rollover: time.Second})
+	defer s.Close()
+	write(t, s, speech(1000), speech(1500), silence(700), speech(300))
+	if err := s.Finish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(e.all()); n < 2 {
+		t.Fatalf("%d parts: rollover never happened after handovers stopped", n)
 	}
 }

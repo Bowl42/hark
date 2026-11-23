@@ -58,13 +58,15 @@ const DefaultRollover = 2 * time.Minute
 
 // Options configures a Session. The zero value is usable.
 type Options struct {
-	// Commit is the commit policy. The zero value is strict, which commits only at the end (and at each rollover);
+	// Commit is the commit policy. The zero value is strict, which commits only what the engine finalizes: at the
+	// end, segments it hands over, and each rollover;
 	// for freeze see docs/PROTOCOL.md.
 	Commit api.Commit
-	// Rollover bounds how long one engine stream runs: once a stream has received this much audio, the session
-	// finishes it at the next pause (500ms of silence; a minute later it cuts regardless) and continues on a fresh
-	// stream. The finished stream's text is committed. Zero means DefaultRollover. There is no "never": engines keep
-	// and resend a stream's whole transcript, so one endless stream would grow without bound.
+	// Rollover bounds how much unsettled audio one engine stream holds: once a stream has received this much audio
+	// beyond what it has handed over results for (see hark.Output), the session finishes it at the next pause (500ms
+	// of silence; a minute later it cuts regardless) and continues on a fresh stream. The finished stream's text is
+	// committed. Engines that keep handing over finished segments are therefore rarely rolled over; those that never
+	// hand over are rolled over every Rollover of audio. Zero means DefaultRollover; it can't be turned off.
 	// When audio arrives faster than the previous stream finalizes, a cut is postponed, so a stream can receive up to
 	// Rollover plus two minutes (and Write waits for the previous stream rather than exceed that).
 	Rollover time.Duration
@@ -223,12 +225,12 @@ func (s *Session) Write(pcm []byte) error {
 		return s.write(pcm)
 	}
 	for len(pcm) > 0 {
-		if s.cut.overdue() { // fast input outran the previous part's finish: wait for it rather than overfill this part
+		if s.cut.overdue(s.cur.part.settled.Load()) { // fast input outran the previous part's finish: wait for it rather than overfill this part
 			if err := s.waitOld(); err != nil {
 				return err
 			}
 		}
-		n, cut := s.cut.scan(pcm[:min(len(pcm), maxScan)], s.idle())
+		n, cut := s.cut.scan(pcm[:min(len(pcm), maxScan)], s.idle(), s.cur.part.settled.Load())
 		if n > 0 {
 			if err := s.write(pcm[:n]); err != nil {
 				return err
@@ -272,8 +274,10 @@ func (s *Session) waitOld() error {
 	return nil
 }
 
-// write sends pcm to the current stream.
+// write sends pcm to the current stream. The part's fed count is published first, so results the engine hands over
+// during this Write may settle the audio it was just given.
 func (s *Session) write(pcm []byte) error {
+	s.cur.part.fed.Add(int64(len(pcm) / 2))
 	if err := s.cur.s.Write(pcm); err != nil {
 		return s.engineErr(err)
 	}
@@ -304,6 +308,7 @@ func (s *Session) rollover() error {
 	p := s.out.newPart(s.written)
 	req := s.req
 	req.Log = req.Log.With("part", p.n)
+	req.Log.Info("rollover: new engine stream", "at_ms", s.written*1000/hark.SampleRate)
 	pctx, pcancel := context.WithCancel(s.ctx)
 	st, err := s.engine.Open(pctx, req, p)
 	if err != nil {

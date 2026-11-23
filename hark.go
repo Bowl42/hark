@@ -45,16 +45,25 @@ type AudioRange struct {
 
 // Output is where an engine reports results. hark provides it.
 type Output interface {
-	// Update reports a **full snapshot of all current segments** (not a delta).
-	// hark works out which segments changed and pushes that downstream; the engine need not care.
+	// Update reports the engine's results: done are segments handed over for good, live is a **full snapshot of
+	// every segment after them** (not a delta). hark works out what changed and pushes that downstream.
 	//
-	// It may be called from any goroutine and never blocks. hark only guarantees to push the latest snapshot;
-	// snapshots reported in quick succession may be coalesced.
+	// Handing over is optional but keeps long streams cheap: a done segment will never change and is never
+	// reported again (later updates start after it), so the engine can forget it, and hark commits it right away
+	// under any commit policy. (Under freeze, text hark has already frozen takes precedence: if a handover doesn't
+	// line up with it segment by segment, hark keeps the segments as part of the full snapshot and applies the
+	// usual freeze normalization, as for an engine that never hands over; retiring them is deferred.) Done segments are appended after those handed over before, in order; done implies
+	// Final. An engine that can't tell when a segment is final for good just reports Update(nil, everything);
+	// such streams are still bounded, by rollover (see session.Options.Rollover).
 	//
-	// Ownership: after the call, the segments slice belongs to hark, which may modify segments in place
-	// (e.g. personal vocabulary replacement). The engine must not read or write it afterwards, and should
-	// build a new slice for every report.
-	Update(segments []Segment)
+	// It may be called from any goroutine and never blocks. Every call's done segments are kept; of the live
+	// snapshots, hark only guarantees to push the latest (snapshots in quick succession may be coalesced).
+	// Calls must be ordered: a call's live snapshot must follow everything handed over up to that call.
+	//
+	// Ownership: after the call, both slices belong to hark, which may modify segments in place (e.g. personal
+	// vocabulary replacement). The engine must not read or write them afterwards, and should build new slices
+	// for every report.
+	Update(done, live []Segment)
 }
 
 // Request holds the parameters of one session.

@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -27,6 +28,12 @@ func policyOf(c api.Commit) freezePolicy {
 // finishing; the new part is gated: its latest snapshot is held back until the old part is sealed, so at most one part
 // is published at a time. Sealing appends the old part's normalized segments to sealed, all committed, and publishes
 // the next part after them. Each part is normalized by its own transcript, so the freeze policy never spans parts.
+//
+// Engines may also hand over finished segments (the done argument of Update): when the part's normalized state lines
+// up with them segment by segment, they are retired at once: committed and moved to sealed, so neither the engine
+// nor the part keeps them. When it doesn't (a freeze conflict re-segmented or dropped content), the part holds them
+// and keeps presenting the full snapshot, exactly as for engines that never hand over, until it lines up again or
+// the part is sealed.
 //
 // Sealed segments the reader has received (release) are dropped: they never change, so the output only keeps what
 // the reader doesn't have yet plus the live and gated parts. gone counts them, and boundary keeps the last character
@@ -56,9 +63,21 @@ type part struct {
 	n      int   // part number, from 0
 	offset int64 // position of the part's first sample in the session audio
 	tr     *transcript
+	lead   string         // sealed text the part's text follows (for joining); "" once the part has retired text
+	held   []hark.Segment // handed-over segments not yet retired (placed); normally empty
 	gated  bool           // waiting for the previous part to be sealed
-	raw    []hark.Segment // latest snapshot while gated
-	done   bool           // sealed: later snapshots are ignored
+	queued bool           // while gated: an update arrived (rawDone / raw hold it, unplaced)
+	raw    []hark.Segment // while gated: the latest live snapshot
+	// rawDone accumulates what is handed over while gated. Its size is bounded in time (the previous part finishes
+	// within PartFinishTimeout), not by the rollover length.
+	rawDone []hark.Segment
+	done    bool // sealed: later snapshots are ignored
+
+	fed     atomic.Int64 // samples given to the engine so far (part-relative), published before each Write
+	settled atomic.Int64 // samples the engine has handed over everything for (part-relative; see cutter)
+	// handed is how far the handovers received but not yet retired (gated or held) reach: measured when each is
+	// received, so audio given to the engine later doesn't count as settled when they finally retire.
+	handed int64
 }
 
 // newOutput creates an output. c must already be normalized.
@@ -74,7 +93,7 @@ func (o *output) newPart(offset int64) *part {
 	p := &part{o: o, n: o.parts, offset: offset, tr: newTranscript(o.policy)}
 	o.parts++
 	if o.live == nil {
-		o.live = p
+		o.live, p.lead = p, o.sealedText()
 	} else {
 		p.gated = true
 		o.next = p
@@ -98,34 +117,81 @@ func (o *output) tick(now time.Time) {
 }
 
 // Update implements hark.Output.
-func (p *part) Update(segs []hark.Segment) {
+func (p *part) Update(done, live []hark.Segment) {
 	o := p.o
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.closed || p.done {
 		return
 	}
+	fed := p.fed.Load()
+	for i := range done {
+		done[i].Final = true // handed over implies final
+		end := fed           // no timing: everything given to the engine so far
+		if a := done[i].Audio; a != (hark.AudioRange{}) {
+			end = min(a.End, fed) // part-relative (not placed yet); never credit audio the engine hasn't been given
+		}
+		p.handed = max(p.handed, end)
+	}
 	if p.gated {
-		p.raw = segs
+		p.queued = true
+		p.rawDone = append(p.rawDone, done...)
+		p.raw = live
 		return
 	}
-	o.ingest(p, segs)
+	o.ingest(p, o.place(p, done), o.place(p, live))
 }
 
-// ingest feeds a snapshot of the live part p into its transcript. Called with mu held.
-func (o *output) ingest(p *part, segs []hark.Segment) {
+// ingest feeds an update of the live part p (already placed) into its transcript: the snapshot is the held segments,
+// then done, then live. If it is accepted aligned, the held and done segments are retired. Called with mu held.
+func (o *output) ingest(p *part, done, live []hark.Segment) {
+	nd := len(p.held) + len(done)
+	snap := make([]hark.Segment, 0, nd+len(live))
+	snap = append(append(append(snap, p.held...), done...), live...)
+	joinTo(snap, p.lead)
 	now := time.Now()
 	o.tick(now) // advance due commits first: content whose freeze is already due must not be rewritten by this snapshot
-	if p.tr.ingest(o.place(p, segs, o.sealedText()), now) {
+	changed, aligned := p.tr.ingest(snap, now)
+	p.held = nil
+	if nd > 0 {
+		p.held = snap[:nd:nd]
+	}
+	if aligned && nd > 0 {
+		o.retire(p, p.tr.retire(nd))
+		p.held, changed = nil, true
+	}
+	if changed {
 		o.changed()
 	}
 }
 
-// place maps a part's snapshot into the session (segs belongs to hark and is modified in place): audio ranges are
-// shifted by the part's offset (missing ranges stay missing), speaker labels of later parts get a part suffix (a
-// restarted engine may reuse a label for someone else), and a space is added where the part's text meets the sealed
-// text before it (prev) at English letters/digits. Called with mu held.
-func (o *output) place(p *part, segs []hark.Segment, prev string) []hark.Segment {
+// retire moves the retired segments of the live part p to sealed, and settles the audio they were handed over for.
+// Called with mu held.
+func (o *output) retire(p *part, segs []api.Segment) {
+	o.sealed = append(o.sealed, segs...)
+	if lastText(segs) != "" {
+		p.lead = "" // from here on the engine joins its own text
+	}
+	p.settled.Store(max(p.settled.Load(), p.handed))
+}
+
+// joinTo adds a space where the first text of segs meets prev at English letters/digits (segs is modified in place).
+// It only matters at part boundaries: within a stream the engine owns spacing. Already-spaced text is left alone.
+func joinTo(segs []hark.Segment, prev string) {
+	for i := range segs {
+		if segs[i].Text != "" {
+			if join.NeedSpace(prev, segs[i].Text) {
+				segs[i].Text = " " + segs[i].Text
+			}
+			return
+		}
+	}
+}
+
+// place maps segments of a part into the session (segs belongs to hark and is modified in place): audio ranges are
+// shifted by the part's offset (missing ranges stay missing), and speaker labels of later parts get a part suffix (a
+// restarted engine may reuse a label for someone else). Each segment is placed exactly once. Called with mu held.
+func (o *output) place(p *part, segs []hark.Segment) []hark.Segment {
 	for i := range segs {
 		if a := &segs[i].Audio; *a != (hark.AudioRange{}) {
 			a.Start += p.offset
@@ -137,14 +203,6 @@ func (o *output) place(p *part, segs []hark.Segment, prev string) []hark.Segment
 				spk += "#" + strconv.Itoa(p.n)
 			}
 			segs[i].Speaker = spk
-		}
-	}
-	for i := range segs {
-		if segs[i].Text != "" {
-			if join.NeedSpace(prev, segs[i].Text) {
-				segs[i].Text = " " + segs[i].Text
-			}
-			break
 		}
 	}
 	return segs
@@ -199,13 +257,13 @@ func (o *output) seal(p *part) {
 	p.tr.finish()
 	o.sealed = append(o.sealed, p.tr.segs...)
 	o.drops += p.tr.dropped
-	p.done = true
+	p.done, p.held = true, nil // held segments are covered by the sealed state (as a dropped snapshot would be)
 	o.live, o.next = o.next, nil
 	if n := o.live; n != nil {
-		n.gated = false
-		if n.raw != nil {
-			o.ingest(n, n.raw)
-			n.raw = nil
+		n.gated, n.lead = false, o.sealedText()
+		if n.queued {
+			o.ingest(n, o.place(n, n.rawDone), o.place(n, n.raw))
+			n.queued, n.rawDone, n.raw = false, nil, nil
 		}
 	}
 	o.changed()
@@ -272,6 +330,7 @@ func (o *output) finish() {
 	defer o.mu.Unlock()
 	if o.live != nil {
 		o.live.tr.finish()
+		o.live.held = nil
 	}
 	o.closed = true
 	o.changed()
@@ -286,17 +345,22 @@ func (o *output) close() {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.tick(time.Now())
-	if n := o.next; n != nil && n.raw != nil && o.live != nil {
+	if n := o.next; n != nil && n.queued && o.live != nil {
 		prev, _, _ := o.live.tr.state()
 		prevText := lastText(prev)
 		if prevText == "" {
 			prevText = o.sealedText()
 		}
-		for _, g := range o.place(n, n.raw, prevText) {
+		segs := append(o.place(n, n.rawDone), o.place(n, n.raw)...)
+		joinTo(segs, prevText)
+		for _, g := range segs {
 			o.tail = append(o.tail, api.Segment{Text: g.Text, Speaker: g.Speaker,
 				AudioRange: api.AudioRange{StartSample: g.Audio.Start, EndSample: g.Audio.End}})
 		}
-		n.raw = nil
+		n.queued, n.rawDone, n.raw = false, nil, nil
+	}
+	if o.live != nil {
+		o.live.held = nil // still shown (the transcript has them), but nothing will retire them now
 	}
 	o.closed = true
 }

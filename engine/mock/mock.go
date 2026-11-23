@@ -59,7 +59,7 @@ type stream struct {
 func (s *stream) Write(pcm []byte) error {
 	s.received += len(pcm)
 	for s.step < len(script) && s.received >= (s.step+1)*s.stepBytes {
-		s.out.Update(slices.Clone(script[s.step])) // a snapshot belongs to hark once handed over, so the global script itself must not be handed out
+		s.out.Update(nil, slices.Clone(script[s.step])) // a snapshot belongs to hark once handed over, so the global script itself must not be handed out
 		s.step++
 	}
 	return nil
@@ -72,7 +72,7 @@ func (s *stream) Finish(context.Context) error {
 			final = append(final, hark.Segment{Text: seg.Text, Final: true})
 		}
 	}
-	s.out.Update(final)
+	s.out.Update(nil, final)
 	return nil
 }
 

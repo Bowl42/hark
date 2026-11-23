@@ -10,7 +10,7 @@
 | `tokens` | empty | Allowed tokens. Clients send `Authorization: Bearer <token>` (browsers use `?token=`). When empty, there is no authentication, which is only suitable for a private network; empty strings are ignored |
 | `data_dir` | empty | Personal vocabulary directory, holds `vocab.db` (SQLite). If unset, personal vocabulary is disabled |
 | `max_session` | unlimited | Maximum duration of a single session |
-| `rollover` | `2m` | For long sessions: after this much audio, each track moves to a fresh engine stream at the next pause; the finished stream's text is committed (see [long sessions](PROTOCOL.md#long-sessions)). It can't be turned off: engines keep and resend a stream's whole transcript, so one endless stream would grow without bound |
+| `rollover` | `2m` | For long sessions: once an engine stream holds this much audio it hasn't finalized, the track moves to a fresh engine stream at the next pause; the finished stream's text is committed (see [long sessions](PROTOCOL.md#long-sessions)). Engines that hand over finished sentences (the batch engines, `ws` services that send `done`) rarely need it. It can't be turned off |
 | `spool_dir` | system temp dir | With `output.mode: final`, a track's committed text waits here until `track_end` once it passes 64KB, so long sessions don't hold it in memory. Files are unlinked as soon as they are created (on Windows, removed once the session has ended) |
 | `finish_timeout` | `15s` | How long to wait for the engine to finalize after the client sends finish |
 | `default_engine` | see description | Engine to use when the client doesn't specify one. Can be omitted when only one engine is configured |

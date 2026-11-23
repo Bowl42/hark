@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -126,7 +127,8 @@ type stream struct {
 	preroll   []byte      // the last 200ms of audio outside a sentence: a sentence starts a little earlier so the onset of the first word isn't clipped
 	speechRun int64       // consecutive voiced samples (before a sentence has started)
 	silentRun int64       // consecutive silent samples within a sentence
-	sents     []*sentence // all sentences; the last one may still be in progress
+	sents     []*sentence // sentences not handed over yet; the last one may still be in progress
+	edge      string      // text of the last sentence handed over (for spacing the next one)
 	cur       *sentence   // the sentence currently being spoken
 	wantPart  bool        // the current sentence needs an interim result
 	pending   int         // sentences that have ended but whose whole-sentence recognition isn't done yet
@@ -375,7 +377,7 @@ func (s *stream) work() {
 			// the sentence may have ended and be waiting for whole-sentence recognition: the interim result can still be shown meanwhile
 			if !target.final {
 				target.text = strings.TrimSpace(text)
-				s.out.Update(s.snapshot())
+				s.report()
 			}
 		default:
 			target.text = strings.TrimSpace(text)
@@ -383,16 +385,33 @@ func (s *stream) work() {
 			target.pcm = nil
 			s.pending--
 			signal(s.progress)
-			s.out.Update(s.snapshot())
+			s.report()
 		}
 		s.mu.Unlock()
 	}
 }
 
-// snapshot returns the current snapshot: sentences without text are omitted, and a space is added between adjacent sentences that meet at English letters/digits. Called with mu held.
-func (s *stream) snapshot() []hark.Segment {
+// report hands the current results to Output. The leading run of sentences that have ended and have their
+// whole-sentence result can't change any more: they are handed over and forgotten, so the stream only keeps what
+// may still change, however long it runs. Called with mu held.
+func (s *stream) report() {
+	k := 0
+	for k < len(s.sents) && s.sents[k].ended && s.sents[k].final {
+		k++
+	}
+	done, edge := segments(s.sents[:k], s.edge)
+	live, _ := segments(s.sents[k:], edge)
+	s.sents = slices.Delete(s.sents, 0, k) // also clears the vacated pointers
+	s.edge = edge
+	s.out.Update(done, live)
+}
+
+// segments turns sentences into segments: sentences without text are omitted, and a space is added between
+// adjacent sentences that meet at English letters/digits (prev is the text before the first). It also returns the
+// last text, for joining what follows.
+func segments(sents []*sentence, prev string) ([]hark.Segment, string) {
 	var segs []hark.Segment
-	for _, x := range s.sents {
+	for _, x := range sents {
 		if x.text == "" {
 			continue
 		}
@@ -401,12 +420,13 @@ func (s *stream) snapshot() []hark.Segment {
 			end = x.start + int64(len(x.pcm)/2)
 		}
 		text := x.text
-		if n := len(segs); n > 0 && join.NeedSpace(segs[n-1].Text, text) {
+		if join.NeedSpace(prev, text) {
 			text = " " + text
 		}
 		segs = append(segs, hark.Segment{Text: text, Final: x.final, Audio: hark.AudioRange{Start: x.start, End: end}})
+		prev = text
 	}
-	return segs
+	return segs, prev
 }
 
 func (s *stream) Finish(ctx context.Context) error {
@@ -434,7 +454,7 @@ func (s *stream) Finish(ctx context.Context) error {
 	if err := s.failed(); err != nil {
 		return err
 	}
-	s.out.Update(s.snapshot())
+	s.report()
 	return nil
 }
 

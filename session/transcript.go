@@ -32,19 +32,22 @@ type transcript struct {
 
 func newTranscript(p freezePolicy) *transcript { return &transcript{policy: p} }
 
-// ingest accepts a snapshot from the engine and reports whether the normalized state changed.
-func (t *transcript) ingest(snap []hark.Segment, now time.Time) bool {
+// ingest accepts a snapshot from the engine and reports whether the normalized state changed, and whether the
+// snapshot was accepted index-aligned: normalized segment i is snapshot segment i (no frozen content, or the
+// frozen segments are kept as is). Only then may segments the engine handed over be retired by count.
+func (t *transcript) ingest(snap []hark.Segment, now time.Time) (changed, aligned bool) {
 	segs := make([]api.Segment, len(snap))
 	finals := make([]bool, len(snap))
 	for i, s := range snap {
 		segs[i] = api.Segment{Text: s.Text, Speaker: s.Speaker, AudioRange: api.AudioRange{StartSample: s.Audio.Start, EndSample: s.Audio.End}}
 		finals[i] = s.Final
 	}
+	aligned = true
 	if t.commit > 0 {
 		var ok bool
-		if segs, finals, ok = t.keepFrozen(segs, finals); !ok {
+		if segs, finals, aligned, ok = t.keepFrozen(segs, finals); !ok {
 			t.dropped++
-			return false
+			return false, false
 		}
 	}
 
@@ -63,14 +66,26 @@ func (t *transcript) ingest(snap []hark.Segment, now time.Time) bool {
 	for stable < len(segs) && finals[stable] {
 		stable++
 	}
-	changed := d < len(segs) || len(segs) != len(t.segs) || stable != t.stable
+	changed = d < len(segs) || len(segs) != len(t.segs) || stable != t.stable
 	t.segs, t.finals, t.since, t.stable = segs, finals, since, stable
-	return changed
+	return changed, aligned
+}
+
+// retire removes the first k segments, which the engine has handed over, and returns them: they are committed for
+// good and leave the transcript. Watermarks shift down by k; the remaining segments keep their timers. The
+// remainder gets fresh storage (readers may still hold the old slices, which are never modified).
+func (t *transcript) retire(k int) []api.Segment {
+	out := t.segs[:k:k]
+	t.segs = append([]api.Segment(nil), t.segs[k:]...)
+	t.finals = append([]bool(nil), t.finals[k:]...)
+	t.since = append([]time.Time(nil), t.since[k:]...)
+	t.stable, t.commit = max(t.stable, k)-k, max(t.commit, k)-k
+	return out
 }
 
 // keepFrozen ensures the frozen prefix is not rewritten, returning the frozen segments plus the part of the new
-// snapshot after the frozen content. If the new content can't be located reliably it returns ok=false and the whole
-// snapshot is discarded.
+// snapshot after the frozen content, and whether the result is index-aligned with segs (strategy 1). If the new
+// content can't be located reliably it returns ok=false and the whole snapshot is discarded.
 //
 // Locating strategies are tried in order of reliability:
 //  1. The frozen segments are kept as is: use them directly.
@@ -82,7 +97,7 @@ func (t *transcript) ingest(snap []hark.Segment, now time.Time) bool {
 //
 // It never guesses by character length: ITN and the like change text length, and aligning by length would duplicate
 // or lose content.
-func (t *transcript) keepFrozen(segs []api.Segment, finals []bool) ([]api.Segment, []bool, bool) {
+func (t *transcript) keepFrozen(segs []api.Segment, finals []bool) (_ []api.Segment, _ []bool, aligned, ok bool) {
 	frozen := t.segs[:t.commit]
 	if len(segs) >= len(frozen) {
 		sameText, sameMeta := true, true
@@ -94,7 +109,7 @@ func (t *transcript) keepFrozen(segs []api.Segment, finals []bool) ([]api.Segmen
 			if !sameMeta {
 				t.dropped++ // upstream changed the speaker or timestamps of frozen segments: ignore
 			}
-			return t.withFrozen(segs[len(frozen):]), finalsWithFrozen(len(frozen), finals[len(frozen):]), true
+			return t.withFrozen(segs[len(frozen):]), finalsWithFrozen(len(frozen), finals[len(frozen):]), true, true
 		}
 	}
 
@@ -113,7 +128,7 @@ func (t *transcript) keepFrozen(segs []api.Segment, finals []bool) ([]api.Segmen
 			tail[0].Text = tail[0].Text[off:]
 			tail[0].AudioRange = api.AudioRange{} // the segment was split, so its original time range is no longer accurate
 		}
-		return t.withFrozen(tail), finalsWithFrozen(len(frozen), tailFinals), true
+		return t.withFrozen(tail), finalsWithFrozen(len(frozen), tailFinals), false, true
 	}
 
 	if end, ok := frozenEnd(frozen); ok && allTimed(segs) {
@@ -127,9 +142,9 @@ func (t *transcript) keepFrozen(segs []api.Segment, finals []bool) ([]api.Segmen
 				tailFinals = append(tailFinals, finals[i])
 			}
 		}
-		return t.withFrozen(tail), finalsWithFrozen(len(frozen), tailFinals), true
+		return t.withFrozen(tail), finalsWithFrozen(len(frozen), tailFinals), false, true
 	}
-	return nil, nil, false
+	return nil, nil, false, false
 }
 
 func (t *transcript) withFrozen(tail []api.Segment) []api.Segment {

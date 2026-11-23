@@ -18,13 +18,17 @@ import (
 	"github.com/coder/websocket"
 )
 
+// recorder keeps every full snapshot: everything handed over, then the live segments.
 type recorder struct {
 	mu   sync.Mutex
+	done []hark.Segment
 	snap [][]hark.Segment
 }
 
-func (r *recorder) Update(s []hark.Segment) {
+func (r *recorder) Update(done, live []hark.Segment) {
 	r.mu.Lock()
+	r.done = append(r.done, done...)
+	s := append(append([]hark.Segment(nil), r.done...), live...)
 	r.snap = append(r.snap, s)
 	r.mu.Unlock()
 }

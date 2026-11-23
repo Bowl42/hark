@@ -11,7 +11,7 @@ hark config:
         type: ws
         url: ws://127.0.0.1:9001
 
-See engine/wsasr for the protocol: recognize audio as it arrives and send back all sentences whenever the result changes; hark handles rewrites and finalization.
+See engine/wsasr for the protocol: recognize audio as it arrives and send back the sentences whenever the result changes; hark handles rewrites and finalization. A finished sentence is sent once with "done": true and then forgotten, so a session can run for hours without this service (or hark) holding its whole transcript.
 """
 import argparse
 import array
@@ -35,11 +35,12 @@ def load(d, threads):
 
 
 class Session:
-    """One session: the finished sentences plus the one being spoken."""
+    """One session: finished sentences not yet handed over, plus the one being spoken."""
 
     def __init__(self, model):
         self.model, self.stream = model, model.create_stream()
-        self.done = []      # finished sentences
+        self.done = []      # finished sentences not yet sent (sent once, with "done": true)
+        self.prev = ""      # text of the last finished sentence (for spacing the next one)
         self.start = 0      # start of the current sentence (in samples)
         self.samples = 0    # total samples received
 
@@ -65,7 +66,8 @@ class Session:
     def cut(self):
         text = self.spaced(self.model.get_result(self.stream))
         if text:
-            self.done.append(self.segment(text, True))
+            self.done.append(dict(self.segment(text, True), done=True))
+            self.prev = text
         self.model.reset(self.stream)
         self.start = self.samples
 
@@ -77,9 +79,13 @@ class Session:
         cur = self.spaced(self.model.get_result(self.stream))
         return self.done + ([{"text": cur}] if cur else [])
 
+    def sent(self):
+        """The snapshot was sent: its finished sentences are handed over, never to be sent again."""
+        self.done = []
+
     def spaced(self, text):
         """hark concatenates segments directly: when an English sentence follows English text, the space goes at the start of this segment."""
-        prev = self.done[-1]["text"] if self.done else ""
+        prev = self.prev
         if text and prev and prev[-1].isascii() and prev[-1].isalnum() and text[0].isascii() and text[0].isalnum():
             return " " + text
         return text
@@ -99,7 +105,8 @@ async def handle(ws, model, token):
         snap = s.snapshot()
         if snap != last:  # send only when the result changed
             await ws.send(json.dumps({"type": "result", "segments": snap}, ensure_ascii=False))
-            last = snap
+            s.sent()
+            last = s.snapshot()
         if isinstance(msg, str):
             await ws.send(json.dumps({"type": "done"}))
             return

@@ -15,14 +15,18 @@ import (
 	"github.com/coder/websocket"
 )
 
+// recorder keeps the latest full snapshot: everything handed over, then the live segments.
 type recorder struct {
 	mu   sync.Mutex
+	done []hark.Segment
 	last []hark.Segment
 	n    int
 }
 
-func (r *recorder) Update(s []hark.Segment) {
+func (r *recorder) Update(done, live []hark.Segment) {
 	r.mu.Lock()
+	r.done = append(r.done, done...)
+	s := append(append([]hark.Segment(nil), r.done...), live...)
 	r.last, r.n = s, r.n+1
 	r.mu.Unlock()
 }
@@ -232,5 +236,33 @@ func TestDialFailure(t *testing.T) {
 	e, _ := New(Config{URL: "ws://127.0.0.1:1/none"})
 	if _, err := e.Open(context.Background(), hark.Request{}, &recorder{}); err == nil || !strings.Contains(err.Error(), "dial") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// The service may hand over a leading run of segments with "done"; a done after a live segment is ignored.
+func TestHandover(t *testing.T) {
+	url := plugin(t, func(c *websocket.Conn, start startMsg, r *http.Request) {
+		for {
+			typ, _, err := c.Read(context.Background())
+			if err != nil {
+				return
+			}
+			if typ == websocket.MessageBinary {
+				continue
+			}
+			send(c, map[string]any{"type": "result", "segments": []any{
+				map[string]any{"text": "甲。", "done": true}, map[string]any{"text": "乙"}, map[string]any{"text": "丙", "done": true},
+			}})
+			send(c, map[string]any{"type": "result", "segments": []any{map[string]any{"text": "乙。", "final": true}, map[string]any{"text": "丙"}}})
+			send(c, map[string]any{"type": "done"})
+		}
+	})
+	s, out := open(t, url, hark.Request{})
+	if err := s.Finish(ctx(t)); err != nil {
+		t.Fatal(err)
+	}
+	segs, _ := out.get()
+	if len(out.done) != 1 || len(segs) != 3 || segs[0].Text != "甲。" || segs[1].Text != "乙。" || segs[2].Text != "丙" {
+		t.Fatalf("done %+v, full %+v", out.done, segs)
 	}
 }

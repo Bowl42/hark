@@ -63,13 +63,17 @@ func (r *fakeRec) Recognize(ctx context.Context, _ hark.Request, pcm []byte) (st
 	return strings.Repeat("字", len(pcm)/2/1600), nil
 }
 
+// recorder keeps every full snapshot: everything handed over, then the live segments.
 type recorder struct {
-	mu  sync.Mutex
-	all [][]hark.Segment
+	mu   sync.Mutex
+	done []hark.Segment
+	all  [][]hark.Segment
 }
 
-func (r *recorder) Update(s []hark.Segment) {
+func (r *recorder) Update(done, live []hark.Segment) {
 	r.mu.Lock()
+	r.done = append(r.done, done...)
+	s := append(append([]hark.Segment(nil), r.done...), live...)
 	r.all = append(r.all, s)
 	r.mu.Unlock()
 }
@@ -450,3 +454,45 @@ func TestBackpressureRecognizerError(t *testing.T) {
 		t.Fatal("write still blocked after recognizer error")
 	}
 }
+
+// Finished sentences are handed over and forgotten: over a long stream the engine keeps only the sentence in
+// progress, and the full result (handed over + live) is the same as before, spaces included.
+func TestHandsOverFinishedSentences(t *testing.T) {
+	rec := &wordRec{}
+	out := &recorder{}
+	st, err := New(rec, Options{}).Open(context.Background(), hark.Request{}, out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	s := st.(*stream)
+	most := 0
+	const n = 60
+	for i := 0; i < n; i++ {
+		if err := st.Write(audio(0.6, -0.8)); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2 * time.Millisecond) // let the worker recognize
+		s.mu.Lock()
+		most = max(most, len(s.sents))
+		s.mu.Unlock()
+	}
+	if err := st.Finish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var text strings.Builder
+	for _, seg := range out.last() {
+		text.WriteString(seg.Text)
+	}
+	if want := strings.TrimSpace(strings.Repeat(" word.", n)); text.String() != want {
+		t.Fatalf("text %q", text.String())
+	}
+	if most > maxPending+2 || len(s.sents) != 0 || len(out.done) != n {
+		t.Fatalf("engine kept up to %d sentences (%d at the end), handed over %d", most, len(s.sents), len(out.done))
+	}
+}
+
+// wordRec recognizes every sentence as "word." (English, so the engine must space sentences itself).
+type wordRec struct{}
+
+func (wordRec) Recognize(context.Context, hark.Request, []byte) (string, error) { return "word.", nil }

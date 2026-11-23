@@ -47,16 +47,18 @@ func (e *fakeEngine) Open(_ context.Context, _ hark.Request, out hark.Output) (h
 	return nil, nil
 }
 
+// recorder keeps the latest update: what was handed over in it, and the live segments.
 type recorder struct {
 	mu   sync.Mutex
+	done []hark.Segment
 	last []hark.Segment
 	n    int
 }
 
-func (r *recorder) Update(segs []hark.Segment) {
+func (r *recorder) Update(done, live []hark.Segment) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.last, r.n = segs, r.n+1
+	r.done, r.last, r.n = done, live, r.n+1
 }
 
 func TestWrap(t *testing.T) {
@@ -69,7 +71,7 @@ func TestWrap(t *testing.T) {
 	if _, err := e.Open(context.Background(), hark.Request{}, &rec); err != nil {
 		t.Fatal(err)
 	}
-	inner.out.Update([]hark.Segment{{Text: "用哈克", Final: true}})
+	inner.out.Update(nil, []hark.Segment{{Text: "用哈克", Final: true}})
 	if rec.last[0].Text != "用hark" || !rec.last[0].Final {
 		t.Fatalf("got=%+v", rec.last)
 	}
@@ -83,7 +85,7 @@ func TestWrap(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
-				out2.Update([]hark.Segment{{Text: fmt.Sprintf("哈克%d", j)}})
+				out2.Update(nil, []hark.Segment{{Text: fmt.Sprintf("哈克%d", j)}})
 			}
 		}()
 	}
@@ -111,5 +113,24 @@ func BenchmarkRewriter(b *testing.B) {
 		s := append([]hark.Segment(nil), segs...)
 		s[len(s)-1].Text = fmt.Sprintf("最后一句哈克在变%d", i)
 		w.apply(s)
+	}
+}
+
+// After a handover the next text still has a left neighbour: the last raw character handed over. A rule for an
+// English word must not fire inside a longer word that spans the handover.
+func TestWrapHandover(t *testing.T) {
+	inner := &fakeEngine{}
+	e := Wrap(inner, mustCompile(t, map[string]string{"bar": "X"}))
+	var rec recorder
+	if _, err := e.Open(context.Background(), hark.Request{}, &rec); err != nil {
+		t.Fatal(err)
+	}
+	inner.out.Update([]hark.Segment{{Text: "foo"}}, []hark.Segment{{Text: "bar"}})
+	if rec.done[0].Text != "foo" || rec.last[0].Text != "bar" {
+		t.Fatalf("handover: done %+v live %+v", rec.done, rec.last)
+	}
+	inner.out.Update(nil, []hark.Segment{{Text: "bar"}, {Text: " bar"}})
+	if rec.last[0].Text != "bar" || rec.last[1].Text != " X" {
+		t.Fatalf("after handover: %+v", rec.last)
 	}
 }

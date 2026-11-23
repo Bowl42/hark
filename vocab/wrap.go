@@ -36,19 +36,30 @@ type rewriteOutput struct {
 	rw  rewriter
 }
 
-func (o *rewriteOutput) Update(segs []hark.Segment) {
+func (o *rewriteOutput) Update(done, live []hark.Segment) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.rw.apply(segs) // per the hark.Output contract, a snapshot handed over belongs downstream, so it can be rewritten in place
-	o.out.Update(segs)
+	// Per the hark.Output contract both slices belong downstream, so they can be rewritten in place. They are
+	// rewritten as one sequence (a word may span the boundary), then the handed-over part leaves the cache.
+	segs := append(append(make([]hark.Segment, 0, len(done)+len(live)), done...), live...)
+	o.rw.apply(segs)
+	copy(done, segs[:len(done)])
+	copy(live, segs[len(done):])
+	o.rw.handOver(len(done))
+	o.out.Update(done, live)
 }
 
 // rewriter applies the vocabulary to one stream of snapshots. The engine reports a full snapshot every time,
 // but most segments are unchanged, so it caches the previous result by segment index and reuses it when the
 // raw text and both boundary characters are unchanged. Not safe for concurrent use.
+//
+// Segments the engine hands over leave the snapshot for good: handOver drops them from the cache and keeps the
+// last raw character of their text as the left boundary of what follows. Their replacement is fixed at handover,
+// even if it depended on the following text, which may still change.
 type rewriter struct {
 	m     *Matcher
 	cache []cached
+	edge  rune // last raw character handed over; 0 if none
 }
 
 type cached struct {
@@ -67,7 +78,7 @@ func (w *rewriter) apply(segs []hark.Segment) {
 	}
 	// Boundary characters come from the raw text of adjacent non-empty segments; compute them before rewriting.
 	lefts := make([]rune, len(segs))
-	var prev rune
+	prev := w.edge
 	for i, s := range segs {
 		lefts[i] = prev
 		if s.Text != "" {
@@ -86,4 +97,17 @@ func (w *rewriter) apply(segs []hark.Segment) {
 		}
 		segs[i].Text = c.out
 	}
+}
+
+// handOver forgets the first n segments of the last snapshot, which were handed over. The cache holds their raw
+// (unreplaced) text, which is what the boundary needs.
+func (w *rewriter) handOver(n int) {
+	n = min(n, len(w.cache))
+	for i := n - 1; i >= 0; i-- {
+		if raw := w.cache[i].raw; raw != "" {
+			w.edge, _ = utf8.DecodeLastRuneInString(raw)
+			break
+		}
+	}
+	w.cache = append([]cached(nil), w.cache[n:]...)
 }
